@@ -13,11 +13,26 @@ find_package(GTest REQUIRED)
 
 
 # Ajoute l'exécutable
-#add_executable(intervalix main6.cu)
-add_executable(test test/lower_bound.cu)
-# Lie les bibliothèques CUDA
-target_link_libraries(test ${CUDA_LIBRARIES} GTest::GTest GTest::Main)
+add_library(interval_intersection src/interval_intersection.cu)
+target_include_directories(interval_intersection PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Macro to check for kernel launch errors and synchronize.
+target_link_libraries(interval_intersection PUBLIC ${CUDA_LIBRARIES})
+
+
+add_executable(exemple_main src/main.cu)
+target_link_libraries(exemple_main PRIVATE
+	interval_intersection
+	PUBLIC ${CUDA_LIBRARIES}
+)
+
+
+
+add_executable(intersection_test src/test_intersection.cu)
+## Lie les bibliothèques CUDA
+target_link_libraries(intersection_test ${CUDA_LIBRARIES} interval_intersection GTest::GTest GTest::Main)
 
 # Spécifie que le fichier est en CUDA
+#set_source_files_properties(main3.cu PROPERTIES LANGUAGE CUDA)
 
-set_source_files_properties(main3.cu PROPERTIES LANGUAGE CUDA)
+#enable_testing()
+#add_test(NAME IntervalTests COMMAND intersection_test)
