@@ -15,12 +15,19 @@ int main() {
     printf("Simplified Example: N = %d\n", n);
 
     // Host side
+    // there are two sets, a and b.
+    // we store begin and end in a SOA way. 
     std::vector<int> h_a_begin(n);
     std::vector<int> h_a_end(n);
     std::vector<int> h_b_begin(n);
     std::vector<int> h_b_end(n);
 
     printf("Initializing host data...\n");
+
+    // Here, interval sets are defined to be like this : 
+    // a : [----)....[----)....
+    // b : .[----)....[----)...
+    // i : .[---).....[---)....
     for (int i = 0; i < n; ++i) {
         h_a_begin[i] = 4 * i;
         h_a_end[i]   = 4 * i + 2;
@@ -35,7 +42,7 @@ int main() {
     int *d_b_begin = nullptr; 
     int *d_b_end = nullptr;
 
-    // Allocate
+    // Allocate sets in gpu
     cudaMalloc(&d_a_begin, size_bytes);
     cudaMalloc(&d_a_end,   size_bytes);
     cudaMalloc(&d_b_begin, size_bytes);
@@ -55,6 +62,7 @@ int main() {
     int *d_b_idx = nullptr;
     int  total_intersections = 0;
 
+    // Events are for for timers
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
