@@ -1,6 +1,6 @@
 # CUDA Interval Intersection (intervalix, because we are french !)
 
-This is a simple experimental project to find intersection between to srt of intervals in CUDA. 
+This is a simple experimental project to find intersection between two sets of intervals in CUDA. 
 
 ## What is a set of intervals ? 
 
