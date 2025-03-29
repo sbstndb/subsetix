@@ -9,6 +9,7 @@
 
 namespace
 {
+    // Taken an interval b in a set set1, where is the first interval in set2 that may intersect with b ?	
     __device__ int lower_bound_end(const int* B_end, int n, int value) {
         int left = 0;
         int right = n;
@@ -23,6 +24,7 @@ namespace
         return left;
     }
 
+    // Taken an interval b in a set set1, where is the last interval in set2 that may intersect with b ? 
     __device__ int lower_bound_begin(const int* B_begin, int n, int value) {
         int left = 0;
         int right = n;
@@ -45,7 +47,11 @@ namespace
         return (a < b) ? a : b;
     }
 
-// --- Kernel 1: Count Intersections per A interval, this is usefull to preallocate the resulting array
+// First step : compute the array size. 
+// We want to store the intersection fast and in a parallel way. 
+// Hence, the strategy is to precompute the array size
+// Hence, each interval can write its intersection without any array locking 
+// This need to be investiguated : we can do much better :-)
     __global__ void intersection_count_kernel(
         const int* d_a_begin, const int* d_a_end, int a_size,
         const int* d_b_begin, const int* d_b_end, int b_size,
@@ -74,7 +80,9 @@ namespace
         }
     }
 
-// --- Kernel 2: Write the intersection on the preallocated resulting array
+// Second step : We have the preallocated array. 
+// Each thread take an interval and try to find intersection in [lower_bound_begin, lower_bound_end]
+// Then, it writes the intersections in the output subset array. 
     __global__ void intersection_write_kernel(
         const int* d_a_begin, const int* d_a_end, int a_size,
         const int* d_b_begin, const int* d_b_end, int b_size,
@@ -143,7 +151,6 @@ cudaError_t findIntervalIntersections(
 
     cudaError_t err = cudaSuccess;
 
-    // --- Device Allocation (Intermediate Count/Offset Arrays) ---
     thrust::device_vector<int> d_per_thread_counts;
     thrust::device_vector<int> d_output_offsets;
     try {
@@ -151,8 +158,6 @@ cudaError_t findIntervalIntersections(
         d_output_offsets.resize(a_size); // exclusive_scan needs size n for output
     } catch (const std::exception& e) {
         fprintf(stderr, "Error allocating intermediate Thrust vectors: %s\n", e.what());
-        // Thrust exceptions don't map directly to cudaError_t easily,
-        // cudaErrorMemoryAllocation is a reasonable approximation.
         return cudaErrorMemoryAllocation;
     }
 
@@ -161,7 +166,7 @@ cudaError_t findIntervalIntersections(
     int threadsPerBlock = 256;
     int blocksPerGrid = (a_size + threadsPerBlock - 1) / threadsPerBlock;
 
-    // PASS 1: Count Intersections
+    // Step 1 : counting for preallocation
     intersection_count_kernel<<<blocksPerGrid, threadsPerBlock>>>(
         d_a_begin, d_a_end, a_size,
         d_b_begin, d_b_end, b_size,
