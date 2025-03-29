@@ -60,17 +60,17 @@ namespace
         int i = blockIdx.x * blockDim.x + threadIdx.x;
         if (i < a_size) {
             int a_begin = d_a_begin[i];
-            int a_end = d_a_end[i];
+            int a_end   = d_a_end[i];
             int local_count = 0;
 
-            int j_min = lower_bound_end(d_b_end, b_size, a_begin);
+            int j_min = lower_bound_end(  d_b_end,   b_size, a_begin);
             int j_max = lower_bound_begin(d_b_begin, b_size, a_end);
 
             for (int j = j_min; j < j_max && j < b_size; j++) {
                 int b_begin = d_b_begin[j];
-                int b_end = d_b_end[j];
+                int b_end   = d_b_end[j];
                 int inter_begin = max_device(a_begin, b_begin);
-                int inter_end = min_device(a_end, b_end);
+                int inter_end   = min_device(a_end, b_end);
 
                 if (inter_begin < inter_end) {
                     local_count++;
@@ -88,23 +88,23 @@ namespace
         const int* d_b_begin, const int* d_b_end, int b_size,
         const int* d_output_offsets, 
         int* d_r_begin, int* d_r_end,
-        int* d_a_idx, int* d_b_idx)   
+        int* d_a_idx,   int* d_b_idx)   
     {
         int i = blockIdx.x * blockDim.x + threadIdx.x;
         if (i < a_size) {
             int a_begin = d_a_begin[i];
-            int a_end = d_a_end[i];
+            int a_end   = d_a_end[i];
             int write_offset = d_output_offsets[i];
             int local_write_idx = 0;
 
-            int j_min = lower_bound_end(d_b_end, b_size, a_begin);
+            int j_min = lower_bound_end(  d_b_end,   b_size, a_begin);
             int j_max = lower_bound_begin(d_b_begin, b_size, a_end);
 
             for (int j = j_min; j < j_max && j < b_size; j++) {
                 int b_begin = d_b_begin[j];
                 int b_end = d_b_end[j];
                 int inter_begin = max_device(a_begin, b_begin);
-                int inter_end = min_device(a_end, b_end);
+                int inter_end   = min_device(a_end,   b_end);
 
                 if (inter_begin < inter_end) {
                     int pos = write_offset + local_write_idx;
@@ -129,15 +129,6 @@ cudaError_t findIntervalIntersections(
     int** d_a_idx, int** d_b_idx,
     int* total_intersections_count)
 {
-    if (!d_a_begin || !d_a_end || !d_b_begin || !d_b_end ||
-        !d_r_begin || !d_r_end || !d_a_idx || !d_b_idx || !total_intersections_count) {
-        fprintf(stderr, "Error: Null pointer passed to findIntervalIntersections.\n");
-        return cudaErrorInvalidValue;
-    }
-    if (a_size < 0 || b_size < 0) {
-        fprintf(stderr, "Error: Negative size passed to findIntervalIntersections.\n");
-        return cudaErrorInvalidValue;
-    }
 
     *d_r_begin = nullptr;
     *d_r_end = nullptr;
@@ -145,21 +136,13 @@ cudaError_t findIntervalIntersections(
     *d_b_idx = nullptr;
     *total_intersections_count = 0;
 
-    if (a_size == 0 || b_size == 0) {
-        return cudaSuccess; 
-    }
 
     cudaError_t err = cudaSuccess;
 
     thrust::device_vector<int> d_per_thread_counts;
     thrust::device_vector<int> d_output_offsets;
-    try {
-        d_per_thread_counts.resize(a_size);
-        d_output_offsets.resize(a_size); // exclusive_scan needs size n for output
-    } catch (const std::exception& e) {
-        fprintf(stderr, "Error allocating intermediate Thrust vectors: %s\n", e.what());
-        return cudaErrorMemoryAllocation;
-    }
+    d_per_thread_counts.resize(a_size);
+    d_output_offsets.resize(a_size); // exclusive_scan needs size n for output
 
 
     // Kernel Configuration
@@ -172,30 +155,12 @@ cudaError_t findIntervalIntersections(
         d_b_begin, d_b_end, b_size,
         thrust::raw_pointer_cast(d_per_thread_counts.data())
     );
-    err = KERNEL_CHECK(); // Check kernel launch and synchronize
-    if (err != cudaSuccess) {
-        // Thrust vectors auto-cleanup
-        return err;
-    }
 
     // Prefix Sum (Scan) using Thrust
-    try {
-        thrust::exclusive_scan(thrust::device, // Execute on device
-                           d_per_thread_counts.begin(),
-                           d_per_thread_counts.end(),
-                           d_output_offsets.begin());
-         // Synchronize after thrust call to ensure completion and check errors
-        err = CUDA_CHECK(cudaDeviceSynchronize());
-        if (err != cudaSuccess) {
-             fprintf(stderr, "Error during or after Thrust scan.\n");
-             // Thrust vectors auto-cleanup
-             return err;
-        }
-    } catch (const std::exception& e) {
-        fprintf(stderr, "Error during Thrust scan: %s\n", e.what());
-        // Thrust vectors auto-cleanup
-        return cudaErrorLaunchFailure; // Or another appropriate error
-    }
+    thrust::exclusive_scan(thrust::device, // Execute on device
+                       d_per_thread_counts.begin(),
+                       d_per_thread_counts.end(),
+                       d_output_offsets.begin());
 
 
     // Determine Total Count
@@ -205,19 +170,10 @@ cudaError_t findIntervalIntersections(
         // Need to copy the last elements back to host
         int last_offset_val = 0;
         int last_count_val = 0;
-        try {
             // Accessing .back() directly involves D->H copy
             last_offset_val = d_output_offsets.back();
-            last_count_val = d_per_thread_counts.back();
-            h_total_count = last_offset_val + last_count_val;
-        } catch (const std::exception& e) {
-            fprintf(stderr, "Error retrieving total count from device: %s\n", e.what());
-            // Check CUDA error state as well, as Thrust might wrap a CUDA error
-            err = cudaGetLastError();
-            if (err == cudaSuccess) err = cudaErrorUnknown; // Assign a generic error if none was pending
-            // Thrust vectors auto-cleanup
-            return err;
-        }
+            last_count_val  = d_per_thread_counts.back();
+            h_total_count   = last_offset_val + last_count_val;
     }
 
     *total_intersections_count = h_total_count;
@@ -228,14 +184,10 @@ cudaError_t findIntervalIntersections(
         size_t indices_size_bytes = (size_t)h_total_count * sizeof(int);
 
         // Allocate output device memory - use the pointers passed by the caller
-        err = CUDA_CHECK(cudaMalloc(d_r_begin, results_size_bytes));
-        if (err != cudaSuccess) goto cleanup; // Use goto for central cleanup on allocation failure
-        err = CUDA_CHECK(cudaMalloc(d_r_end,   results_size_bytes));
-        if (err != cudaSuccess) goto cleanup;
-        err = CUDA_CHECK(cudaMalloc(d_a_idx,   indices_size_bytes));
-        if (err != cudaSuccess) goto cleanup;
-        err = CUDA_CHECK(cudaMalloc(d_b_idx,   indices_size_bytes));
-        if (err != cudaSuccess) goto cleanup;
+        cudaMalloc(d_r_begin, results_size_bytes);
+        cudaMalloc(d_r_end,   results_size_bytes);
+        cudaMalloc(d_a_idx,   indices_size_bytes);
+        cudaMalloc(d_b_idx,   indices_size_bytes);
 
         // Launch Write Kernel
         intersection_write_kernel<<<blocksPerGrid, threadsPerBlock>>>(
@@ -243,36 +195,18 @@ cudaError_t findIntervalIntersections(
             d_b_begin, d_b_end, b_size,
             thrust::raw_pointer_cast(d_output_offsets.data()),
             *d_r_begin, *d_r_end, 
-            *d_a_idx, *d_b_idx
+            *d_a_idx,   *d_b_idx
         );
-        err = KERNEL_CHECK(); // Check kernel launch and synchronize
-        if (err != cudaSuccess) goto cleanup; // If kernel fails, cleanup allocated memory
 
     } // End if (h_total_count > 0)
 
-    // Success path: fall through cleanup or directly return success
-    // Thrust vectors d_per_thread_counts, d_output_offsets are automatically freed here.
     return cudaSuccess;
-
-cleanup:
-    // Error path cleanup: Free any successfully allocated output arrays
-    // freeIntersectionResults handles null pointers safely.
-    freeIntersectionResults(*d_r_begin, *d_r_end, *d_a_idx, *d_b_idx);
-    // Reset output pointers to null to indicate failure/no allocation
-    *d_r_begin = nullptr;
-    *d_r_end = nullptr;
-    *d_a_idx = nullptr;
-    *d_b_idx = nullptr;
-    *total_intersections_count = 0;
-    // Thrust vectors are automatically freed by their destructors.
-    return err; // Return the error that caused the jump to cleanup
 }
 
-
-// --- Public Helper Function Implementation ---
 void freeIntersectionResults(int* d_r_begin, int* d_r_end, int* d_a_idx, int* d_b_idx) {
     CUDA_CHECK(cudaFree(d_r_begin));
     CUDA_CHECK(cudaFree(d_r_end));
     CUDA_CHECK(cudaFree(d_a_idx));
     CUDA_CHECK(cudaFree(d_b_idx));
 }
+

@@ -38,9 +38,9 @@ int main() {
     // Device side
     printf("Allocating and copying inputs to device...\n");
     int *d_a_begin = nullptr; 
-    int *d_a_end = nullptr;
+    int *d_a_end   = nullptr;
     int *d_b_begin = nullptr; 
-    int *d_b_end = nullptr;
+    int *d_b_end   = nullptr;
 
     // Allocate sets in gpu
     cudaMalloc(&d_a_begin, size_bytes);
@@ -57,10 +57,10 @@ int main() {
     // Intersection arrays, device side
     printf("Calling library function...\n");
     int *d_r_begin = nullptr;
-    int  *d_r_end = nullptr;
-    int   *d_a_idx = nullptr;
-    int *d_b_idx = nullptr;
-    int  total_intersections = 0;
+    int *d_r_end   = nullptr;
+    int *d_a_idx   = nullptr;
+    int *d_b_idx   = nullptr;
+    int total_intersections = 0;
 
     // Events are for for timers
     cudaEvent_t start, stop;
@@ -71,10 +71,10 @@ int main() {
 
     //cudaError_t err = 
     findIntervalIntersections(
-        d_a_begin, d_a_end, n,
-        d_b_begin, d_b_end, n,
+        d_a_begin,  d_a_end, n,
+        d_b_begin,  d_b_end, n,
         &d_r_begin, &d_r_end,
-        &d_a_idx, &d_b_idx,
+        &d_a_idx,   &d_b_idx,
         &total_intersections
     );
 //    CUDA_CHECK(err); 
@@ -93,8 +93,8 @@ int main() {
     // Copy result to host
     if (total_intersections > 0) {
         printf("Copying results Device -> Host...\n");
-        std::vector<int> h_r_begin(total_intersections);
-        std::vector<int> h_r_end(total_intersections);
+        std::vector<int>   h_r_begin(total_intersections);
+        std::vector<int>   h_r_end(total_intersections);
         std::vector<int>   h_a_idx(total_intersections);
         std::vector<int>   h_b_idx(total_intersections);
 
