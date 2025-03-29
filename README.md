@@ -7,7 +7,9 @@ This is a simple experimental project to find intersection between to srt of int
 Let's define the set of intervals. 
 
 An interval is defined by two values `begin` and `end` as `interval = [begin, end)`. Please not that `begin` is **included** and `end` is **excluded**.
+
 A set of intervals is **just** a collection of intervals like `set= {[b1, e1), [b2, e2), ...}`
+
 In our example, the set is **normalized** and **sorted** by construct. This means that for two different intervals i1 and i2 in a set, there will be `intersection(i1, i2) = 0` and that `i1.begin < i2.begin`.
 
 
