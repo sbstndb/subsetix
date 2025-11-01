@@ -53,12 +53,73 @@ void freeIntervalResults(int* d_r_y_idx,
                          int* d_a_idx,
                          int* d_b_idx);
 
+cudaError_t computeIntervalIntersectionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    int* d_counts,
+    int* d_offsets,
+    int* total_intersections_count);
+
+cudaError_t writeIntervalIntersectionsWithOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    const int* d_offsets,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    int* d_a_idx,
+    int* d_b_idx);
+
 void freeVolumeIntersectionResults(int* d_r_z_idx,
                                    int* d_r_y_idx,
                                    int* d_r_begin,
                                    int* d_r_end,
                                    int* d_a_idx,
                                    int* d_b_idx);
+
+cudaError_t computeVolumeIntersectionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    int* d_counts,
+    int* d_offsets,
+    int* total_intersections_count);
+
+cudaError_t writeVolumeIntersectionsWithOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    const int* d_a_row_to_y, // may be nullptr -> defaults to row index
+    const int* d_a_row_to_z, // may be nullptr -> defaults to 0
+    const int* d_offsets,
+    int* d_r_z_idx,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    int* d_a_idx,
+    int* d_b_idx);
 
 
 #endif // INTERVAL_INTERSECTION_CUH
