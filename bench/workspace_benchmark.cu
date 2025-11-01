@@ -573,6 +573,9 @@ int main() {
     constexpr int rows3DY = 256;
     constexpr int rows3DZ = 256;
     constexpr int intervalsPerRow3D = 64;
+    constexpr int smallRows3DY = 32;
+    constexpr int smallRows3DZ = 32;
+    constexpr int smallIntervalsPerRow3D = 4;
     constexpr int iterations = 100;
 
     SurfaceDevice rect = makeDenseSurface(rows2D, intervalsPerRow2D);
@@ -580,14 +583,22 @@ int main() {
 
     VolumeDevice box = makeDenseVolume(rows3DZ, rows3DY, intervalsPerRow3D);
     VolumeDevice sph = makeDenseVolume(rows3DZ, rows3DY, intervalsPerRow3D);
+    VolumeDevice boxSmall = makeDenseVolume(smallRows3DZ, smallRows3DY, smallIntervalsPerRow3D);
+    VolumeDevice sphSmall = makeDenseVolume(smallRows3DZ, smallRows3DY, smallIntervalsPerRow3D);
+
+    int stream_count = 4;
 
     float classic2D = benchmarkClassic2D(rect, circ, iterations);
     float workspace2D = benchmarkWorkspaceStream2D(rect, circ, iterations);
-    int stream_count = 4;
+    float multiStream2D = benchmarkWorkspaceMultiStream2D(rect, circ, iterations, stream_count);
+
     float classic3D = benchmarkClassic3D(box, sph, iterations);
     float workspace3D = benchmarkWorkspaceStream3D(box, sph, iterations);
-    float multiStream2D = benchmarkWorkspaceMultiStream2D(rect, circ, iterations, stream_count);
     float multiStream3D = benchmarkWorkspaceMultiStream3D(box, sph, iterations, stream_count);
+
+    float classic3DSmall = benchmarkClassic3D(boxSmall, sphSmall, iterations);
+    float workspace3DSmall = benchmarkWorkspaceStream3D(boxSmall, sphSmall, iterations);
+    float multiStream3DSmall = benchmarkWorkspaceMultiStream3D(boxSmall, sphSmall, iterations, stream_count);
 
     printf("Benchmark (%d iterations)\n", iterations);
     printf("2D classic:   %.3f ms/iter\n", classic2D);
@@ -596,10 +607,15 @@ int main() {
     printf("3D classic:   %.3f ms/iter\n", classic3D);
     printf("3D workspace: %.3f ms/iter\n", workspace3D);
     printf("3D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3D);
+    printf("3D SMALL classic:   %.3f ms/iter\n", classic3DSmall);
+    printf("3D SMALL workspace: %.3f ms/iter\n", workspace3DSmall);
+    printf("3D SMALL workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3DSmall);
 
     freeSurface(rect);
     freeSurface(circ);
     freeVolume(box);
     freeVolume(sph);
+    freeVolume(boxSmall);
+    freeVolume(sphSmall);
     return 0;
 }
