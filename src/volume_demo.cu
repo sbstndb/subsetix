@@ -107,21 +107,23 @@ VolumeIntervals volumeFromIntersections(const std::vector<int>& z_idx,
 }
 
 int main() {
-    constexpr int width = 256;
-    constexpr int height = 256;
-    constexpr int depth = 128;
+    constexpr int width = 1024;
+    constexpr int height = 1024;
+    constexpr int depth = 1024;
+    constexpr bool WRITE_VTK = false; // disable heavy IO for high-res timing
 
     try {
+        // Make both shapes cover nearly all rows to reach ~1M intervals
         VolumeIntervals box = generateBox(width, height, depth,
-                                          32, 200,
-                                          40, 220,
-                                          20, 100);
+                                          0, width,     // full width
+                                          0, height,    // all rows in y
+                                          0, depth);    // all rows in z
 
         VolumeIntervals sphere = generateSphere(width, height, depth,
                                                 width / 2.0f,
                                                 height / 2.0f,
                                                 depth / 2.0f,
-                                                70.0f);
+                                                3000.0f); // huge radius: one interval on every row
 
         auto union_start = std::chrono::high_resolution_clock::now();
         VolumeIntervals volume_union = unionVolumes(box, sphere);
@@ -197,21 +199,23 @@ int main() {
         VolumeIntervals volume_intersection = volumeFromIntersections(
             h_r_z_idx, h_r_y_idx, h_r_begin, h_r_end, width, height, depth);
 
-        auto box_mask = rasterizeToMask(box);
-        auto sphere_mask = rasterizeToMask(sphere);
-        auto union_mask = rasterizeToMask(volume_union);
-        auto intersection_mask = rasterizeToMask(volume_intersection);
+        if (WRITE_VTK) {
+            auto box_mask = rasterizeToMask(box);
+            auto sphere_mask = rasterizeToMask(sphere);
+            auto union_mask = rasterizeToMask(volume_union);
+            auto intersection_mask = rasterizeToMask(volume_intersection);
 
-        writeStructuredPoints("volume_box.vtk", width, height, depth, box_mask);
-        writeStructuredPoints("volume_sphere.vtk", width, height, depth, sphere_mask);
-        writeStructuredPoints("volume_union.vtk", width, height, depth, union_mask);
-        writeStructuredPoints("volume_intersection.vtk", width, height, depth, intersection_mask);
+            writeStructuredPoints("volume_box.vtk", width, height, depth, box_mask);
+            writeStructuredPoints("volume_sphere.vtk", width, height, depth, sphere_mask);
+            writeStructuredPoints("volume_union.vtk", width, height, depth, union_mask);
+            writeStructuredPoints("volume_intersection.vtk", width, height, depth, intersection_mask);
 
-        std::cout << "Generated VTK volumes:\n"
-                  << "  volume_box.vtk\n"
-                  << "  volume_sphere.vtk\n"
-                  << "  volume_union.vtk\n"
-                  << "  volume_intersection.vtk\n";
+            std::cout << "Generated VTK volumes:\n"
+                      << "  volume_box.vtk\n"
+                      << "  volume_sphere.vtk\n"
+                      << "  volume_union.vtk\n"
+                      << "  volume_intersection.vtk\n";
+        }
 
         freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
         freeDeviceVolume(d_box);
