@@ -1,74 +1,61 @@
-# CUDA Interval Intersection (intervalix, because we are french !)
+# Subsetix — CUDA interval intersections (1D/2D/3D)
 
-This is a simple experimental project to find intersection between two sets of intervals in CUDA. 
+Intersections d'intervalles sur GPU, en CSR par lignes:
+- 1D: une seule ligne.
+- 2D: lignes = y (offsets par y).
+- 3D: lignes aplaties (z,y) avec `row_offsets`, `row_to_y`, `row_to_z`.
 
-## What is a set of intervals ? 
+Deux passes CUDA (count + write), recherche via bornes binaires, sorties compactes.
 
-Let's define the set of intervals. 
+## Schéma de données (CSR)
+- Entrées par ensemble S: `begin[]`, `end[]`, `row_offsets[]` (taille rows+1).
+- 3D ajoute `row_to_y[]`, `row_to_z[]` (taille rows).
+- Résultats (option): indices de ligne (y ou z+y), `r_begin[]`, `r_end[]`, `a_idx[]`, `b_idx[]`.
 
-An interval is defined by two values `begin` and `end` as `interval = [begin, end)`. Please not that `begin` is **included** and `end` is **excluded**.
+API (device ptrs): voir `src/interval_intersection.cuh`
+- 2D: `findIntervalIntersections(...)` avec offsets par y.
+- 3D: `findVolumeIntersections(...)` avec offsets par ligne et maps y/z.
 
-A set of intervals is **just** a collection of intervals like `set= {[b1, e1), [b2, e2), ...}`
+## Build rapide
+- Prérequis: CUDA (nvcc), Thrust, CMake, GTest.
+- Arch GPU (RTX 1000 Ada): `CMAKE_CUDA_ARCHITECTURES 89` (déjà réglé dans `CMakeLists.txt`).
 
-In our example, the set is **normalized** and **sorted** by construct. This means that for two different intervals i1 and i2 in a set, there will be `intersection(i1, i2) = 0` and that `i1.begin < i2.begin`.
-
-
-## Example of intersection
-
-Let `A` and `B` be a set. 
-
-`A = {[0,2), [4, 6), [8, 10)}`
-
-`B = {[1,3), [6, 9), [10, 12)}`
-
-Thus, the intersection set is : 
-
-`I = {[1, 2), [8, 9)}`
-
-
-## What this project does
-
-- Takes two set of intervals
-- Use CUDA kernels to perform  the intersection
-- employes a two-pass approach: 
-    -   The first one count how many intersections each interval in the set1 has with the set2. This helps know how much space is needed for the result.
-    -   The second one is calculate the intersection and write them in the preallocated array.
-
-- To find the intersection areao, we use lower_bounds to the left and to the right of the considered interval. 
-- We have a simple demo showing how to use it, and measure the performance (while it is not perfect, it is a WIP)
-- We provide a `google-test` to show that is just works. 
-
-## Requirements
-
--   A Cuda capable GPU
--   CUDA Toolkit with `thrust`
--   `Cmake`
--   `google-test` (if not, you can disable by comenting it in the CMake file)
-
-## Building
-
-1. Clone the repo
-
-2. Create a build directory 
+Commandes:
 ```bash
-mkdir build && cd build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
-3. Run `CMake`
-!!! Be carefull. As it is a WIP, the current CMake specifies the CUDA architecture to be SM_86. You should change it according to your specific hardware.
+## Exécutables
+- `build/intersection_test` — tests 1D/2D/3D (GTest).
+- `build/exemple_main` — exemple minimal.
+- `build/surface_demo` — 2D (génère 4 fichiers VTK pour ParaView).
+- `build/volume_demo` — 3D (VTK désactivé par défaut, cf. `WRITE_VTK`).
 
-After changing the architecture : 
+## Utilisation minimale (2D/3D)
+- 2D: fournir `a_begin/a_end/a_y_offsets`, `b_begin/b_end/b_y_offsets`, `y_count` identiques.
+- 3D: fournir `*_row_offsets`, `row_to_y`, `row_to_z` (pour A), et `row_count` identiques.
+- Les fonctions allouent les buffers résultats (libérer via `freeIntervalResults`/`freeVolumeIntersectionResults`).
+
+Sources utiles:
+- `src/interval_intersection.cu` — kernels + orchestration (2 passes, Thrust scan).
+- `src/surface_generator.*` / `src/volume_generator.*` — générateurs rect/cercle/box/sphere, union, raster, VTK.
+- `src/surface_demo.cu`, `src/volume_demo.cu` — démos + mesures ns/interval.
+
+## Tests et benchmarks
 ```bash
-cmake .. 
-make
+./build/intersection_test
+./build/surface_demo   # ~1M interv./résultat, écrit VTK
+./build/volume_demo    # ~1M interv./résultat, VTK off
 ```
+Exemple (RTX 1000 Ada, Release):
+- 2D: ~2.36 ns/interval (intersection seule, sans IO).
+- 3D: ~2.62 ns/interval (intersection seule).
 
-4. Run executables
+Notes:
+- La métrique ns/interval est basée sur le nombre d'intersections produites.
+- Adapter les tailles/densités dans les démos (constantes en tête de fichier) pour mesurer à grande échelle.
 
-After building, you can run the example from the build directory : 
-
-```bash
-./exemple_main
-```
-
-
+## Limitations connues
+- `find_row_for_interval(...)` fait une recherche binaire par thread; pour plus de perf, pré-mapper l'intervalle vers sa ligne.
+- CMake utilise `find_package(CUDA)` (déprécié) mais fonctionne; modernisation possible.

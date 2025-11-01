@@ -218,6 +218,56 @@ TEST(SurfaceIntersectionTest, OneDimensional) {
 }
 
 
+TEST(SurfaceIntersectionTest, OneDimensionalComplex) {
+    // y_count = 1, several adjacent and overlapping intervals
+    SurfaceHost a = buildSurface(1, {{
+        {0, 2}, {3, 7}, {8, 10}, {15, 20}
+    }});
+
+    SurfaceHost b = buildSurface(1, {{
+        {2, 3}, {4, 5}, {6, 9}, {10, 15}, {18, 22}
+    }});
+
+    std::vector<SurfaceIntersectionResult> expected = {
+        {0, 4, 5, 1, 1},   // [3,7] ∩ [4,5]
+        {0, 6, 7, 1, 2},   // [3,7] ∩ [6,9]
+        {0, 8, 9, 2, 2},   // [8,10] ∩ [6,9]
+        {0, 18, 20, 3, 4}  // [15,20] ∩ [18,22]
+    };
+
+    expectSurfaceIntersections(a, b, expected);
+}
+
+TEST(SurfaceIntersectionTest, ComplexMultiRow) {
+    // 3 rows, varying counts, multiple overlaps per row
+    SurfaceHost a = buildSurface(3, {
+        {{0, 5}, {6, 10}},
+        {{2, 4}, {5, 6}, {8, 12}},
+        {}
+    });
+
+    SurfaceHost b = buildSurface(3, {
+        {{1, 3}, {3, 6}, {7, 8}, {10, 12}},
+        {{1, 2}, {4, 9}, {11, 13}},
+        {{0, 100}}
+    });
+
+    // Global indices (flattened):
+    // A: r0 -> 0,1; r1 -> 2,3,4
+    // B: r0 -> 0,1,2,3; r1 -> 4,5,6; r2 -> 7
+    std::vector<SurfaceIntersectionResult> expected = {
+        {0, 3, 5, 0, 1},  // r0: [0,5] ∩ [3,6]
+        {0, 1, 3, 0, 0},  // r0: [0,5] ∩ [1,3]
+        {0, 7, 8, 1, 2},  // r0: [6,10] ∩ [7,8]
+        {1, 5, 6, 3, 5},  // r1: [5,6] ∩ [4,9]
+        {1, 8, 9, 4, 5},  // r1: [8,12] ∩ [4,9]
+        {1, 11, 12, 4, 6} // r1: [8,12] ∩ [11,13]
+    };
+
+    expectSurfaceIntersections(a, b, expected);
+}
+
+
 struct VolumeHost {
     int z_count = 0;
     int y_count = 0;
@@ -518,4 +568,45 @@ TEST(VolumeIntersectionSimpleTest, MismatchedRowsReturnsError) {
 
     freeDeviceVolume(d_a);
     freeDeviceVolume(d_b);
+}
+
+TEST(VolumeIntersectionSimpleTest, ComplexMixedRows3D) {
+    // z=2, y=3, mixed densities and overlaps
+    // A rows (z,y):
+    // (0,0): [0,5],[7,9]; (0,1): -; (0,2): [10,15]
+    // (1,0): [2,4],[6,12]; (1,1): [0,3]; (1,2): -
+    VolumeHost a = buildVolume(2, 3, {
+        {{0, 5}, {7, 9}},   // r0 (z0,y0)
+        {},                 // r1 (z0,y1)
+        {{10, 15}},         // r2 (z0,y2)
+        {{2, 4}, {6, 12}},  // r3 (z1,y0)
+        {{0, 3}},           // r4 (z1,y1)
+        {}                  // r5 (z1,y2)
+    });
+
+    // B rows:
+    // (0,0): [1,2],[3,8]; (0,1): [0,100]; (0,2): [5,10],[12,20]
+    // (1,0): [0,10],[11,13]; (1,1): [3,5]; (1,2): -
+    VolumeHost b = buildVolume(2, 3, {
+        {{1, 2}, {3, 8}},   // r0
+        {{0, 100}},         // r1
+        {{5, 10}, {12, 20}},// r2
+        {{0, 10}, {11, 13}},// r3
+        {{3, 5}},           // r4
+        {}                  // r5
+    });
+
+    // A indices: r0 -> 0,1; r1 -> -; r2 -> 2; r3 -> 3,4; r4 -> 5; r5 -> -
+    // B indices: r0 -> 0,1; r1 -> 2; r2 -> 3,4; r3 -> 5,6; r4 -> 7; r5 -> -
+    std::vector<IntersectionResult> expected = {
+        {0, 0, 1, 2, 0, 0},   // (0,0): [0,5] ∩ [1,2]
+        {0, 0, 3, 5, 0, 1},   // (0,0): [0,5] ∩ [3,8]
+        {0, 0, 7, 8, 1, 1},   // (0,0): [7,9] ∩ [3,8]
+        {0, 2, 12, 15, 2, 4}, // (0,2): [10,15] ∩ [12,20]
+        {1, 0, 2, 4, 3, 5},   // (1,0): [2,4] ∩ [0,10]
+        {1, 0, 6, 10, 4, 5},  // (1,0): [6,12] ∩ [0,10]
+        {1, 0, 11, 12, 4, 6}  // (1,0): [6,12] ∩ [11,13]
+    };
+
+    expectIntersections(a, b, expected);
 }
