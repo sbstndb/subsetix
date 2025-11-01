@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <utility>
 #include <vector>
@@ -106,6 +107,34 @@ VolumeIntervals volumeFromIntersections(const std::vector<int>& z_idx,
     return volume;
 }
 
+namespace {
+
+int fractionToCoord(int max_value, double fraction) {
+    if (fraction < 0.0) {
+        fraction = 0.0;
+    } else if (fraction > 1.0) {
+        fraction = 1.0;
+    }
+    int value = static_cast<int>(std::round(max_value * fraction));
+    if (value < 0) {
+        value = 0;
+    } else if (value > max_value) {
+        value = max_value;
+    }
+    return value;
+}
+
+float fractionToFloatCoord(int max_value, double fraction) {
+    if (fraction < 0.0) {
+        fraction = 0.0;
+    } else if (fraction > 1.0) {
+        fraction = 1.0;
+    }
+    return static_cast<float>(max_value * fraction);
+}
+
+} // namespace
+
 int main() {
     constexpr int width = 1024;
     constexpr int height = 1024;
@@ -113,25 +142,53 @@ int main() {
     constexpr bool WRITE_VTK = false; // disable heavy IO for high-res timing
 
     try {
-        // Make both shapes cover nearly all rows to reach ~1M intervals
-        VolumeIntervals box = generateBox(width, height, depth,
-                                          0, width,     // full width
-                                          0, height,    // all rows in y
-                                          0, depth);    // all rows in z
+        // Build a composite of five axis-aligned boxes.
+        auto makeBox = [&](double x0, double x1,
+                           double y0, double y1,
+                           double z0, double z1) {
+            return generateBox(width, height, depth,
+                               fractionToCoord(width, x0), fractionToCoord(width, x1),
+                               fractionToCoord(height, y0), fractionToCoord(height, y1),
+                               fractionToCoord(depth, z0), fractionToCoord(depth, z1));
+        };
 
-        VolumeIntervals sphere = generateSphere(width, height, depth,
-                                                width / 2.0f,
-                                                height / 2.0f,
-                                                depth / 2.0f,
-                                                3000.0f); // huge radius: one interval on every row
+        VolumeIntervals boxes = makeBox(0.05, 0.25, 0.10, 0.30, 0.10, 0.30);
+        boxes = unionVolumes(boxes, makeBox(0.30, 0.55, 0.20, 0.50, 0.20, 0.45));
+        boxes = unionVolumes(boxes, makeBox(0.50, 0.75, 0.40, 0.70, 0.35, 0.65));
+        boxes = unionVolumes(boxes, makeBox(0.15, 0.40, 0.55, 0.85, 0.55, 0.85));
+        boxes = unionVolumes(boxes, makeBox(0.60, 0.85, 0.15, 0.35, 0.70, 0.90));
+
+        // Build a composite of five spheres located in different regions.
+        auto makeSphere = [&](double cx, double cy, double cz, double radius_fraction) {
+            if (radius_fraction < 0.01) {
+                radius_fraction = 0.01;
+            } else if (radius_fraction > 0.25) {
+                radius_fraction = 0.25;
+            }
+            return generateSphere(
+                width, height, depth,
+                fractionToFloatCoord(width, cx),
+                fractionToFloatCoord(height, cy),
+                fractionToFloatCoord(depth, cz),
+                static_cast<float>(width * radius_fraction));
+        };
+
+        VolumeIntervals spheres = makeSphere(0.30, 0.35, 0.40, 0.12);
+        spheres = unionVolumes(spheres, makeSphere(0.65, 0.35, 0.35, 0.10));
+        spheres = unionVolumes(spheres, makeSphere(0.40, 0.65, 0.60, 0.11));
+        spheres = unionVolumes(spheres, makeSphere(0.72, 0.68, 0.75, 0.13));
+        spheres = unionVolumes(spheres, makeSphere(0.22, 0.72, 0.55, 0.09));
+
+        std::cout << "Composite boxes intervals:   " << boxes.intervalCount() << "\n";
+        std::cout << "Composite spheres intervals: " << spheres.intervalCount() << "\n";
 
         auto union_start = std::chrono::high_resolution_clock::now();
-        VolumeIntervals volume_union = unionVolumes(box, sphere);
+        VolumeIntervals volume_union = unionVolumes(boxes, spheres);
         auto union_end = std::chrono::high_resolution_clock::now();
         double union_ms = std::chrono::duration<double, std::milli>(union_end - union_start).count();
 
-        DeviceVolume d_box = copyToDevice(box);
-        DeviceVolume d_sphere = copyToDevice(sphere);
+        DeviceVolume d_boxes = copyToDevice(boxes);
+        DeviceVolume d_spheres = copyToDevice(spheres);
 
         int* d_r_z_idx = nullptr;
         int* d_r_y_idx = nullptr;
@@ -148,10 +205,10 @@ int main() {
         CUDA_CHECK(cudaEventRecord(start));
 
         cudaError_t err = findVolumeIntersections(
-            d_box.begin, d_box.end, d_box.interval_count,
-            d_box.row_offsets, d_box.row_to_y, d_box.row_to_z, d_box.row_count,
-            d_sphere.begin, d_sphere.end, d_sphere.interval_count,
-            d_sphere.row_offsets, d_sphere.row_count,
+            d_boxes.begin, d_boxes.end, d_boxes.interval_count,
+            d_boxes.row_offsets, d_boxes.row_to_y, d_boxes.row_to_z, d_boxes.row_count,
+            d_spheres.begin, d_spheres.end, d_spheres.interval_count,
+            d_spheres.row_offsets, d_spheres.row_count,
             &d_r_z_idx, &d_r_y_idx,
             &d_r_begin, &d_r_end,
             &d_a_idx, &d_b_idx,
@@ -168,8 +225,8 @@ int main() {
 
         if (err != cudaSuccess) {
             std::cerr << "CUDA intersection failed: " << cudaGetErrorString(err) << "\n";
-            freeDeviceVolume(d_box);
-            freeDeviceVolume(d_sphere);
+            freeDeviceVolume(d_boxes);
+            freeDeviceVolume(d_spheres);
             return EXIT_FAILURE;
         }
 
@@ -182,6 +239,7 @@ int main() {
         std::cout << "Intersection time (device): " << milliseconds << " ms"
                   << " (" << total_ns << " ns total, "
                   << per_interval_ns << " ns/interval)\n";
+        std::cout << "Total intersections: " << total_intersections << "\n";
 
         std::vector<int> h_r_z_idx(total_intersections);
         std::vector<int> h_r_y_idx(total_intersections);
@@ -200,28 +258,28 @@ int main() {
             h_r_z_idx, h_r_y_idx, h_r_begin, h_r_end, width, height, depth);
 
         if (WRITE_VTK) {
-            auto box_mask = rasterizeToMask(box);
-            auto sphere_mask = rasterizeToMask(sphere);
+            auto boxes_mask = rasterizeToMask(boxes);
+            auto spheres_mask = rasterizeToMask(spheres);
             auto union_mask = rasterizeToMask(volume_union);
             auto intersection_mask = rasterizeToMask(volume_intersection);
 
-            writeStructuredPoints("volume_box.vtk", width, height, depth, box_mask);
-            writeStructuredPoints("volume_sphere.vtk", width, height, depth, sphere_mask);
+            writeStructuredPoints("volume_boxes.vtk", width, height, depth, boxes_mask);
+            writeStructuredPoints("volume_spheres.vtk", width, height, depth, spheres_mask);
             writeStructuredPoints("volume_union.vtk", width, height, depth, union_mask);
             writeStructuredPoints("volume_intersection.vtk", width, height, depth, intersection_mask);
 
-            std::cout << "Generated VTK volumes:\n"
-                      << "  volume_box.vtk\n"
-                      << "  volume_sphere.vtk\n"
-                      << "  volume_union.vtk\n"
-                      << "  volume_intersection.vtk\n";
+            std::cout << "Generated 3D VTK volumes:\n";
+            std::cout << "  volume_boxes.vtk\n";
+            std::cout << "  volume_spheres.vtk\n";
+            std::cout << "  volume_union.vtk\n";
+            std::cout << "  volume_intersection.vtk\n";
         }
 
         freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
-        freeDeviceVolume(d_box);
-        freeDeviceVolume(d_sphere);
+        freeDeviceVolume(d_boxes);
+        freeDeviceVolume(d_spheres);
     } catch (const std::exception& ex) {
-        std::cerr << "Error: " << ex.what() << "\n";
+        std::cerr << "Exception: " << ex.what() << "\n";
         return EXIT_FAILURE;
     }
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <utility>
 #include <vector>
@@ -80,57 +81,89 @@ SurfaceIntervals surfaceFromIntersections(const std::vector<int>& y_idx,
     return surface;
 }
 
+namespace {
+
+int fractionToCoord(int max_value, double fraction) {
+    if (fraction < 0.0) {
+        fraction = 0.0;
+    } else if (fraction > 1.0) {
+        fraction = 1.0;
+    }
+    int value = static_cast<int>(std::round(max_value * fraction));
+    if (value < 0) {
+        value = 0;
+    } else if (value > max_value) {
+        value = max_value;
+    }
+    return value;
+}
+
+} // namespace
+
 int main() {
     constexpr int intervals_per_row = 1024;
     constexpr int width = intervals_per_row * 4;
     constexpr int height = 1024;
     constexpr bool RUN_HOST_UNION = false;
     constexpr bool WRITE_VTK = false;
-    constexpr int total_intervals = height * intervals_per_row;
 
     try {
-        SurfaceIntervals rectangle;
-        rectangle.width = width;
-        rectangle.height = height;
-        rectangle.y_offsets.resize(height + 1);
-        rectangle.x_begin.resize(total_intervals);
-        rectangle.x_end.resize(total_intervals);
+        // Build a composite set of five rectangles with varying extents.
+        SurfaceIntervals rectangles = generateRectangle(
+            width, height,
+            fractionToCoord(width, 0.05), fractionToCoord(width, 0.35),
+            fractionToCoord(height, 0.10), fractionToCoord(height, 0.40));
 
-        SurfaceIntervals circle;
-        circle.width = width;
-        circle.height = height;
-        circle.y_offsets.resize(height + 1);
-        circle.x_begin.resize(total_intervals);
-        circle.x_end.resize(total_intervals);
+        rectangles = unionSurfaces(rectangles, generateRectangle(
+            width, height,
+            fractionToCoord(width, 0.30), fractionToCoord(width, 0.55),
+            fractionToCoord(height, 0.25), fractionToCoord(height, 0.55)));
 
-        for (int y = 0; y < height; ++y) {
-            rectangle.y_offsets[y] = y * intervals_per_row;
-            circle.y_offsets[y] = y * intervals_per_row;
-            for (int i = 0; i < intervals_per_row; ++i) {
-                int idx = y * intervals_per_row + i;
-                int base = 4 * i;
-                rectangle.x_begin[idx] = base;
-                rectangle.x_end[idx] = base + 2;
-                circle.x_begin[idx] = base + 1;
-                circle.x_end[idx] = base + 3;
-            }
-        }
-        rectangle.y_offsets[height] = total_intervals;
-        circle.y_offsets[height] = total_intervals;
+        rectangles = unionSurfaces(rectangles, generateRectangle(
+            width, height,
+            fractionToCoord(width, 0.60), fractionToCoord(width, 0.90),
+            fractionToCoord(height, 0.20), fractionToCoord(height, 0.50)));
+
+        rectangles = unionSurfaces(rectangles, generateRectangle(
+            width, height,
+            fractionToCoord(width, 0.15), fractionToCoord(width, 0.40),
+            fractionToCoord(height, 0.55), fractionToCoord(height, 0.85)));
+
+        rectangles = unionSurfaces(rectangles, generateRectangle(
+            width, height,
+            fractionToCoord(width, 0.45), fractionToCoord(width, 0.75),
+            fractionToCoord(height, 0.05), fractionToCoord(height, 0.25)));
+
+        // Build a composite set of five circles scattered across the domain.
+        auto makeCircle = [&](double cx, double cy, double radius_fraction) {
+            int center_x = fractionToCoord(width, cx);
+            int center_y = fractionToCoord(height, cy);
+            int radius = std::max(1, fractionToCoord(width, radius_fraction));
+            return generateCircle(width, height, center_x, center_y, radius);
+        };
+
+        SurfaceIntervals circles = makeCircle(0.20, 0.30, 0.12);
+        circles = unionSurfaces(circles, makeCircle(0.50, 0.20, 0.10));
+        circles = unionSurfaces(circles, makeCircle(0.75, 0.60, 0.14));
+        circles = unionSurfaces(circles, makeCircle(0.35, 0.75, 0.11));
+        circles = unionSurfaces(circles, makeCircle(0.62, 0.48, 0.09));
+
+        std::cout << "Composite rectangles intervals: " << rectangles.intervalCount() << "\n";
+        std::cout << "Composite circles intervals:    " << circles.intervalCount() << "\n";
 
         [[maybe_unused]] SurfaceIntervals surface_union;
         [[maybe_unused]] double union_ms = 0.0;
         [[maybe_unused]] bool have_union = false;
         if (RUN_HOST_UNION || WRITE_VTK) {
             auto union_start = std::chrono::high_resolution_clock::now();
-            surface_union = unionSurfaces(rectangle, circle);
+            surface_union = unionSurfaces(rectangles, circles);
             auto union_end = std::chrono::high_resolution_clock::now();
             union_ms = std::chrono::duration<double, std::milli>(union_end - union_start).count();
             have_union = true;
         }
 
-        DeviceSurface d_rect = copyToDevice(rectangle);
-        DeviceSurface d_circle = copyToDevice(circle);
+        DeviceSurface d_rectangles = copyToDevice(rectangles);
+        DeviceSurface d_circles = copyToDevice(circles);
 
         int* d_r_y_idx = nullptr;
         int* d_r_begin = nullptr;
@@ -145,10 +178,10 @@ int main() {
         CUDA_CHECK(cudaEventRecord(start));
 
         cudaError_t err = findIntervalIntersections(
-            d_rect.begin, d_rect.end, d_rect.interval_count,
-            d_rect.offsets, height,
-            d_circle.begin, d_circle.end, d_circle.interval_count,
-            d_circle.offsets, height,
+            d_rectangles.begin, d_rectangles.end, d_rectangles.interval_count,
+            d_rectangles.offsets, height,
+            d_circles.begin, d_circles.end, d_circles.interval_count,
+            d_circles.offsets, height,
             &d_r_y_idx,
             &d_r_begin, &d_r_end,
             &d_a_idx, &d_b_idx,
@@ -164,8 +197,8 @@ int main() {
 
         if (err != cudaSuccess) {
             std::cerr << "CUDA intersection failed: " << cudaGetErrorString(err) << "\n";
-            freeDeviceSurface(d_rect);
-            freeDeviceSurface(d_circle);
+            freeDeviceSurface(d_rectangles);
+            freeDeviceSurface(d_circles);
             return EXIT_FAILURE;
         }
 
@@ -180,6 +213,7 @@ int main() {
         std::cout << "Intersection time (device): " << milliseconds << " ms"
                   << " (" << total_ns << " ns total, "
                   << per_interval_ns << " ns/interval)\n";
+        std::cout << "Total intersections: " << total_intersections << "\n";
 
         if (WRITE_VTK) {
             std::vector<int> h_r_y_idx(total_intersections);
@@ -196,28 +230,33 @@ int main() {
             SurfaceIntervals surface_intersection = surfaceFromIntersections(
                 h_r_y_idx, h_r_begin, h_r_end, width, height);
 
-            auto rect_mask = rasterizeToMask(rectangle);
-            auto circle_mask = rasterizeToMask(circle);
-            auto union_mask = rasterizeToMask(surface_union);
+            auto rect_mask = rasterizeToMask(rectangles);
+            auto circle_mask = rasterizeToMask(circles);
+            std::vector<int> union_mask = have_union ? rasterizeToMask(surface_union)
+                                                     : std::vector<int>(static_cast<size_t>(width) * height, 0);
             auto intersection_mask = rasterizeToMask(surface_intersection);
 
-            writeStructuredPoints("surface_rectangle.vtk", width, height, rect_mask);
-            writeStructuredPoints("surface_circle.vtk", width, height, circle_mask);
-            writeStructuredPoints("surface_union.vtk", width, height, union_mask);
+            writeStructuredPoints("surface_rectangles.vtk", width, height, rect_mask);
+            writeStructuredPoints("surface_circles.vtk", width, height, circle_mask);
+            if (have_union) {
+                writeStructuredPoints("surface_union.vtk", width, height, union_mask);
+            }
             writeStructuredPoints("surface_intersection.vtk", width, height, intersection_mask);
 
             std::cout << "Generated 2D VTK surfaces:\n";
-            std::cout << "  surface_rectangle.vtk\n";
-            std::cout << "  surface_circle.vtk\n";
-            std::cout << "  surface_union.vtk\n";
+            std::cout << "  surface_rectangles.vtk\n";
+            std::cout << "  surface_circles.vtk\n";
+            if (have_union) {
+                std::cout << "  surface_union.vtk\n";
+            }
             std::cout << "  surface_intersection.vtk\n";
         }
 
         freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
-        freeDeviceSurface(d_rect);
-        freeDeviceSurface(d_circle);
+        freeDeviceSurface(d_rectangles);
+        freeDeviceSurface(d_circles);
     } catch (const std::exception& ex) {
-        std::cerr << "Error: " << ex.what() << "\n";
+        std::cerr << "Exception: " << ex.what() << "\n";
         return EXIT_FAILURE;
     }
 
