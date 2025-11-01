@@ -270,6 +270,97 @@ float benchmarkWorkspaceStream2D(const SurfaceDevice& a,
     return ms / iterations;
 }
 
+float benchmarkWorkspaceMultiStream2D(const SurfaceDevice& a,
+                                      const SurfaceDevice& b,
+                                      int iterations,
+                                      int stream_count) {
+    if (stream_count <= 0) {
+        return 0.0f;
+    }
+
+    std::vector<cudaStream_t> streams(stream_count);
+    for (int i = 0; i < stream_count; ++i) {
+        CUDA_CHECK(cudaStreamCreate(&streams[i]));
+    }
+
+    const size_t row_bytes = static_cast<size_t>(a.row_count) * sizeof(int);
+    std::vector<int*> counts(stream_count, nullptr);
+    std::vector<int*> offsets(stream_count, nullptr);
+    std::vector<ResultBuffers> buffers(stream_count);
+
+    int total = 0;
+    for (int i = 0; i < stream_count; ++i) {
+        if (a.row_count > 0) {
+            CUDA_CHECK(cudaMalloc(&counts[i], row_bytes));
+            CUDA_CHECK(cudaMalloc(&offsets[i], row_bytes));
+        }
+
+        int local_total = 0;
+        cudaError_t err = computeIntervalIntersectionOffsets(
+            a.begin, a.end, a.offsets, a.row_count,
+            b.begin, b.end, b.offsets, b.row_count,
+            counts[i], offsets[i],
+            &local_total,
+            streams[i]);
+        CUDA_CHECK(cudaStreamSynchronize(streams[i]));
+        if (err != cudaSuccess) {
+            printf("computeIntervalIntersectionOffsets (multi-stream 2D) failed: %s\n", cudaGetErrorString(err));
+        }
+        if (i == 0) {
+            total = local_total;
+        }
+    }
+
+    if (total > 0) {
+        for (int i = 0; i < stream_count; ++i) {
+            buffers[i] = allocResults(total);
+        }
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (int i = 0; i < stream_count; ++i) {
+            cudaError_t err = writeIntervalIntersectionsWithOffsets(
+                a.begin, a.end, a.offsets, a.row_count,
+                b.begin, b.end, b.offsets, b.row_count,
+                offsets[i],
+                buffers[i].y_idx,
+                buffers[i].begin,
+                buffers[i].end,
+                buffers[i].a_idx,
+                buffers[i].b_idx,
+                streams[i]);
+            if (err != cudaSuccess) {
+                printf("writeIntervalIntersectionsWithOffsets (multi-stream 2D) failed: %s\n", cudaGetErrorString(err));
+            }
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    for (int i = 0; i < stream_count; ++i) {
+        if (buffers[i].y_idx || buffers[i].z_idx) {
+            freeResults(buffers[i]);
+        }
+        if (counts[i]) CUDA_CHECK(cudaFree(counts[i]));
+        if (offsets[i]) CUDA_CHECK(cudaFree(offsets[i]));
+        CUDA_CHECK(cudaStreamDestroy(streams[i]));
+    }
+
+    return ms / (iterations * stream_count);
+}
+
 float benchmarkClassic3D(const VolumeDevice& a,
                          const VolumeDevice& b,
                          int iterations) {
@@ -383,6 +474,97 @@ float benchmarkWorkspaceStream3D(const VolumeDevice& a,
     return ms / iterations;
 }
 
+float benchmarkWorkspaceMultiStream3D(const VolumeDevice& a,
+                                      const VolumeDevice& b,
+                                      int iterations,
+                                      int stream_count) {
+    if (stream_count <= 0) {
+        return 0.0f;
+    }
+
+    std::vector<cudaStream_t> streams(stream_count);
+    for (int i = 0; i < stream_count; ++i) {
+        CUDA_CHECK(cudaStreamCreate(&streams[i]));
+    }
+
+    const size_t row_bytes = static_cast<size_t>(a.row_count) * sizeof(int);
+    std::vector<int*> counts(stream_count, nullptr);
+    std::vector<int*> offsets(stream_count, nullptr);
+    std::vector<ResultBuffers> buffers(stream_count);
+
+    int total = 0;
+    for (int i = 0; i < stream_count; ++i) {
+        if (a.row_count > 0) {
+            CUDA_CHECK(cudaMalloc(&counts[i], row_bytes));
+            CUDA_CHECK(cudaMalloc(&offsets[i], row_bytes));
+        }
+
+        int local_total = 0;
+        cudaError_t err = computeVolumeIntersectionOffsets(
+            a.begin, a.end, a.offsets, a.row_count,
+            b.begin, b.end, b.offsets, b.row_count,
+            counts[i], offsets[i],
+            &local_total,
+            streams[i]);
+        CUDA_CHECK(cudaStreamSynchronize(streams[i]));
+        if (err != cudaSuccess) {
+            printf("computeVolumeIntersectionOffsets (multi-stream 3D) failed: %s\n", cudaGetErrorString(err));
+        }
+        if (i == 0) {
+            total = local_total;
+        }
+    }
+
+    if (total > 0) {
+        for (int i = 0; i < stream_count; ++i) {
+            buffers[i] = allocResults(total);
+        }
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (int i = 0; i < stream_count; ++i) {
+            cudaError_t err = writeVolumeIntersectionsWithOffsets(
+                a.begin, a.end, a.offsets, a.row_count,
+                b.begin, b.end, b.offsets, b.row_count,
+                a.row_to_y, a.row_to_z,
+                offsets[i],
+                buffers[i].z_idx,
+                buffers[i].y_idx,
+                buffers[i].begin,
+                buffers[i].end,
+                buffers[i].a_idx,
+                buffers[i].b_idx,
+                streams[i]);
+            if (err != cudaSuccess) {
+                printf("writeVolumeIntersectionsWithOffsets (multi-stream 3D) failed: %s\n", cudaGetErrorString(err));
+            }
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    for (int i = 0; i < stream_count; ++i) {
+        if (buffers[i].z_idx) freeResults(buffers[i]);
+        if (counts[i]) CUDA_CHECK(cudaFree(counts[i]));
+        if (offsets[i]) CUDA_CHECK(cudaFree(offsets[i]));
+        CUDA_CHECK(cudaStreamDestroy(streams[i]));
+    }
+
+    return ms / (iterations * stream_count);
+}
+
 } // namespace
 
 int main() {
@@ -401,14 +583,19 @@ int main() {
 
     float classic2D = benchmarkClassic2D(rect, circ, iterations);
     float workspace2D = benchmarkWorkspaceStream2D(rect, circ, iterations);
+    int stream_count = 4;
     float classic3D = benchmarkClassic3D(box, sph, iterations);
     float workspace3D = benchmarkWorkspaceStream3D(box, sph, iterations);
+    float multiStream2D = benchmarkWorkspaceMultiStream2D(rect, circ, iterations, stream_count);
+    float multiStream3D = benchmarkWorkspaceMultiStream3D(box, sph, iterations, stream_count);
 
     printf("Benchmark (%d iterations)\n", iterations);
     printf("2D classic:   %.3f ms/iter\n", classic2D);
     printf("2D workspace: %.3f ms/iter\n", workspace2D);
+    printf("2D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream2D);
     printf("3D classic:   %.3f ms/iter\n", classic3D);
     printf("3D workspace: %.3f ms/iter\n", workspace3D);
+    printf("3D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3D);
 
     freeSurface(rect);
     freeSurface(circ);
@@ -416,4 +603,3 @@ int main() {
     freeVolume(sph);
     return 0;
 }
-
