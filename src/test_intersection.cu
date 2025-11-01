@@ -9,6 +9,215 @@
 #include "interval_intersection.cuh"
 #include "cuda_utils.cuh"
 
+struct SurfaceHost {
+    int y_count = 0;
+    std::vector<int> offsets;
+    std::vector<int> begin;
+    std::vector<int> end;
+
+    int interval_count() const { return static_cast<int>(begin.size()); }
+};
+
+SurfaceHost buildSurface(int y_count,
+                         const std::vector<std::vector<std::pair<int, int>>>& rows) {
+    SurfaceHost surface;
+    surface.y_count = y_count;
+    if (static_cast<int>(rows.size()) != y_count) {
+        throw std::runtime_error("Rows size does not match y_count");
+    }
+
+    surface.offsets.resize(y_count + 1, 0);
+    int write_idx = 0;
+    for (int y = 0; y < y_count; ++y) {
+        surface.offsets[y] = write_idx;
+        for (const auto& interval : rows[y]) {
+            surface.begin.push_back(interval.first);
+            surface.end.push_back(interval.second);
+            ++write_idx;
+        }
+    }
+    surface.offsets[y_count] = write_idx;
+    return surface;
+}
+
+struct DeviceSurfaceForTest {
+    int* begin = nullptr;
+    int* end = nullptr;
+    int* offsets = nullptr;
+    int interval_count = 0;
+};
+
+DeviceSurfaceForTest copySurfaceToDevice(const SurfaceHost& surface) {
+    DeviceSurfaceForTest device;
+    device.interval_count = surface.interval_count();
+
+    const size_t interval_bytes = static_cast<size_t>(surface.interval_count()) * sizeof(int);
+    const size_t offsets_bytes = static_cast<size_t>(surface.y_count + 1) * sizeof(int);
+
+    CUDA_CHECK(cudaMalloc(&device.begin, interval_bytes));
+    CUDA_CHECK(cudaMalloc(&device.end, interval_bytes));
+    CUDA_CHECK(cudaMalloc(&device.offsets, offsets_bytes));
+
+    CUDA_CHECK(cudaMemcpy(device.begin, surface.begin.data(), interval_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(device.end, surface.end.data(), interval_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(device.offsets, surface.offsets.data(), offsets_bytes, cudaMemcpyHostToDevice));
+
+    return device;
+}
+
+void freeDeviceSurface(DeviceSurfaceForTest& surface) {
+    if (surface.begin) CUDA_CHECK(cudaFree(surface.begin));
+    if (surface.end) CUDA_CHECK(cudaFree(surface.end));
+    if (surface.offsets) CUDA_CHECK(cudaFree(surface.offsets));
+    surface = {};
+}
+
+struct SurfaceIntersectionResult {
+    int y_idx;
+    int r_begin;
+    int r_end;
+    int a_idx;
+    int b_idx;
+
+    bool operator==(const SurfaceIntersectionResult& other) const {
+        return y_idx == other.y_idx && r_begin == other.r_begin && r_end == other.r_end &&
+               a_idx == other.a_idx && b_idx == other.b_idx;
+    }
+
+    bool operator<(const SurfaceIntersectionResult& other) const {
+        return std::tie(y_idx, a_idx, b_idx, r_begin, r_end) <
+               std::tie(other.y_idx, other.a_idx, other.b_idx, other.r_begin, other.r_end);
+    }
+};
+
+void expectSurfaceIntersections(const SurfaceHost& a,
+                                const SurfaceHost& b,
+                                const std::vector<SurfaceIntersectionResult>& expected) {
+    DeviceSurfaceForTest d_a = copySurfaceToDevice(a);
+    DeviceSurfaceForTest d_b = copySurfaceToDevice(b);
+
+    int* d_r_y_idx = nullptr;
+    int* d_r_begin = nullptr;
+    int* d_r_end = nullptr;
+    int* d_a_idx = nullptr;
+    int* d_b_idx = nullptr;
+    int total_intersections = 0;
+
+    cudaError_t err = findIntervalIntersections(
+        d_a.begin, d_a.end, d_a.interval_count,
+        d_a.offsets, a.y_count,
+        d_b.begin, d_b.end, d_b.interval_count,
+        d_b.offsets, b.y_count,
+        &d_r_y_idx,
+        &d_r_begin, &d_r_end,
+        &d_a_idx, &d_b_idx,
+        &total_intersections);
+
+    ASSERT_EQ(err, cudaSuccess);
+    ASSERT_EQ(total_intersections, static_cast<int>(expected.size()));
+
+    std::vector<SurfaceIntersectionResult> actual;
+    if (total_intersections > 0) {
+        std::vector<int> h_r_y_idx(total_intersections);
+        std::vector<int> h_r_begin(total_intersections);
+        std::vector<int> h_r_end(total_intersections);
+        std::vector<int> h_a_idx(total_intersections);
+        std::vector<int> h_b_idx(total_intersections);
+
+        const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
+        CUDA_CHECK(cudaMemcpy(h_r_y_idx.data(), d_r_y_idx, results_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_r_begin.data(), d_r_begin, results_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_r_end.data(), d_r_end, results_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_a_idx.data(), d_a_idx, results_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_b_idx.data(), d_b_idx, results_bytes, cudaMemcpyDeviceToHost));
+
+        actual.resize(total_intersections);
+        for (int i = 0; i < total_intersections; ++i) {
+            actual[i] = {h_r_y_idx[i], h_r_begin[i], h_r_end[i], h_a_idx[i], h_b_idx[i]};
+        }
+
+        std::sort(actual.begin(), actual.end());
+        auto sorted_expected = expected;
+        std::sort(sorted_expected.begin(), sorted_expected.end());
+        EXPECT_EQ(actual, sorted_expected);
+    }
+
+    freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+    freeDeviceSurface(d_a);
+    freeDeviceSurface(d_b);
+}
+
+TEST(SurfaceIntersectionTest, BasicOverlap) {
+    SurfaceHost a = buildSurface(2, {
+        {{0, 2}, {5, 7}},
+        {{10, 12}}
+    });
+
+    SurfaceHost b = buildSurface(2, {
+        {{1, 3}, {6, 9}},
+        {{11, 13}}
+    });
+
+    std::vector<SurfaceIntersectionResult> expected = {
+        {0, 1, 2, 0, 0},
+        {0, 6, 7, 1, 1},
+        {1, 11, 12, 2, 2}
+    };
+
+    expectSurfaceIntersections(a, b, expected);
+}
+
+TEST(SurfaceIntersectionTest, NoOverlap) {
+    SurfaceHost a = buildSurface(2, {
+        {{0, 2}, {5, 7}},
+        {{10, 11}}
+    });
+
+    SurfaceHost b = buildSurface(2, {
+        {{2, 4}, {8, 9}},
+        {{11, 13}}
+    });
+
+    expectSurfaceIntersections(a, b, {});
+}
+
+TEST(SurfaceIntersectionTest, EmptyRow) {
+    SurfaceHost a = buildSurface(3, {
+        {{0, 4}},
+        {},
+        {{8, 12}}
+    });
+
+    SurfaceHost b = buildSurface(3, {
+        {{1, 3}},
+        {{6, 9}},
+        {}
+    });
+
+    std::vector<SurfaceIntersectionResult> expected = {
+        {0, 1, 3, 0, 0}
+    };
+
+    expectSurfaceIntersections(a, b, expected);
+}
+
+TEST(SurfaceIntersectionTest, OneDimensional) {
+    SurfaceHost a = buildSurface(1, {
+        {{0, 5}}
+    });
+
+    SurfaceHost b = buildSurface(1, {
+        {{2, 4}}
+    });
+
+    std::vector<SurfaceIntersectionResult> expected = {
+        {0, 2, 4, 0, 0}
+    };
+
+    expectSurfaceIntersections(a, b, expected);
+}
+
+
 struct VolumeHost {
     int z_count = 0;
     int y_count = 0;
@@ -191,7 +400,7 @@ void expectIntersections(const VolumeHost& a,
         EXPECT_EQ(actual, sorted_expected);
     }
 
-    freeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+    freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
     freeDeviceVolume(d_a);
     freeDeviceVolume(d_b);
 }

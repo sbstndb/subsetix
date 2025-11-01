@@ -3,6 +3,26 @@
 
 #include <cuda_runtime.h>
 
+cudaError_t findIntervalIntersections(
+    // Inputs
+    const int* d_a_begin,
+    const int* d_a_end,
+    int a_interval_count,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    int b_interval_count,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    // Outputs
+    int** d_r_y_idx,
+    int** d_r_begin,
+    int** d_r_end,
+    int** d_a_idx,
+    int** d_b_idx,
+    int* total_intersections_count);
+
 cudaError_t findVolumeIntersections(
     // Inputs for set A
     const int* d_a_begin,
@@ -27,12 +47,18 @@ cudaError_t findVolumeIntersections(
     int** d_b_idx,
     int* total_intersections_count);
 
-void freeIntersectionResults(int* d_r_z_idx,
-                             int* d_r_y_idx,
-                             int* d_r_begin,
-                             int* d_r_end,
-                             int* d_a_idx,
-                             int* d_b_idx);
+void freeIntervalResults(int* d_r_y_idx,
+                         int* d_r_begin,
+                         int* d_r_end,
+                         int* d_a_idx,
+                         int* d_b_idx);
+
+void freeVolumeIntersectionResults(int* d_r_z_idx,
+                                   int* d_r_y_idx,
+                                   int* d_r_begin,
+                                   int* d_r_end,
+                                   int* d_a_idx,
+                                   int* d_b_idx);
 
 
 #endif // INTERVAL_INTERSECTION_CUH

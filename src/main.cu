@@ -145,7 +145,7 @@ int main() {
     }
 
     printf("Freeing arrays...\n");
-    freeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+    freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
     cudaFree(d_a_begin);
     cudaFree(d_a_end);
     cudaFree(d_b_begin);

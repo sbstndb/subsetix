@@ -31,9 +31,13 @@ add_executable(intersection_test src/test_intersection.cu)
 ## Lie les bibliothèques CUDA
 target_link_libraries(intersection_test ${CUDA_LIBRARIES} interval_intersection GTest::GTest GTest::Main)
 
-add_executable(surface_demo src/surface_demo.cu src/volume_generator.cpp)
+add_executable(surface_demo src/surface_demo.cu src/surface_generator.cpp)
 target_include_directories(surface_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(surface_demo PRIVATE interval_intersection ${CUDA_LIBRARIES})
+
+add_executable(volume_demo src/volume_demo.cu src/volume_generator.cpp)
+target_include_directories(volume_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(volume_demo PRIVATE interval_intersection ${CUDA_LIBRARIES})
 
 # Spécifie que le fichier est en CUDA
 #set_source_files_properties(main3.cu PROPERTIES LANGUAGE CUDA)
