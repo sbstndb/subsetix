@@ -39,6 +39,13 @@ add_executable(volume_demo src/volume_demo.cu src/volume_generator.cpp)
 target_include_directories(volume_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(volume_demo PRIVATE interval_intersection ${CUDA_LIBRARIES})
 
+add_executable(workspace_benchmark
+    bench/workspace_benchmark.cu
+    src/surface_generator.cpp
+    src/volume_generator.cpp)
+target_include_directories(workspace_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(workspace_benchmark PRIVATE interval_intersection ${CUDA_LIBRARIES})
+
 # Spécifie que le fichier est en CUDA
 #set_source_files_properties(main3.cu PROPERTIES LANGUAGE CUDA)
 
