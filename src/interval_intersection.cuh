@@ -21,7 +21,8 @@ cudaError_t findIntervalIntersections(
     int** d_r_end,
     int** d_a_idx,
     int** d_b_idx,
-    int* total_intersections_count);
+    int* total_intersections_count,
+    cudaStream_t stream = nullptr);
 
 cudaError_t findVolumeIntersections(
     // Inputs for set A
@@ -45,7 +46,8 @@ cudaError_t findVolumeIntersections(
     int** d_r_end,
     int** d_a_idx,
     int** d_b_idx,
-    int* total_intersections_count);
+    int* total_intersections_count,
+    cudaStream_t stream = nullptr);
 
 void freeIntervalResults(int* d_r_y_idx,
                          int* d_r_begin,
@@ -64,7 +66,8 @@ cudaError_t computeIntervalIntersectionOffsets(
     int b_y_count,
     int* d_counts,
     int* d_offsets,
-    int* total_intersections_count);
+    int* total_intersections_count,
+    cudaStream_t stream = nullptr);
 
 cudaError_t writeIntervalIntersectionsWithOffsets(
     const int* d_a_begin,
@@ -80,7 +83,8 @@ cudaError_t writeIntervalIntersectionsWithOffsets(
     int* d_r_begin,
     int* d_r_end,
     int* d_a_idx,
-    int* d_b_idx);
+    int* d_b_idx,
+    cudaStream_t stream = nullptr);
 
 void freeVolumeIntersectionResults(int* d_r_z_idx,
                                    int* d_r_y_idx,
@@ -100,7 +104,8 @@ cudaError_t computeVolumeIntersectionOffsets(
     int b_row_count,
     int* d_counts,
     int* d_offsets,
-    int* total_intersections_count);
+    int* total_intersections_count,
+    cudaStream_t stream = nullptr);
 
 cudaError_t writeVolumeIntersectionsWithOffsets(
     const int* d_a_begin,
@@ -119,7 +124,8 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
     int* d_r_begin,
     int* d_r_end,
     int* d_a_idx,
-    int* d_b_idx);
+    int* d_b_idx,
+    cudaStream_t stream = nullptr);
 
 
 #endif // INTERVAL_INTERSECTION_CUH

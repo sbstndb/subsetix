@@ -15,7 +15,7 @@ Deux passes CUDA (count + write), balayage linéaire par ligne (double pointeur)
 API (device ptrs): voir `src/interval_intersection.cuh`
 - 2D: `findIntervalIntersections(...)` avec offsets par y.
 - 3D: `findVolumeIntersections(...)` avec offsets par ligne et maps y/z.
-- Réutilisation sans `cudaMalloc`: `compute*IntersectionOffsets(...)` + `write*IntersectionsWithOffsets(...)` (buffers `counts/offsets` fournis par l'appelant).
+- Réutilisation sans `cudaMalloc`: `compute*IntersectionOffsets(...)` + `write*IntersectionsWithOffsets(...)` (buffers `counts/offsets` fournis par l'appelant, `cudaStream_t` optionnel).
 
 ## Build rapide
 - Prérequis: CUDA (nvcc), Thrust, CMake, GTest.

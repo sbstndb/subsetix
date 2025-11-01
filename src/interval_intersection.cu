@@ -3,10 +3,11 @@
 
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
 #include <thrust/scan.h>
-#include <thrust/execution_policy.h> 
-#include <exception>                 
-#include <stdexcept>                
+#include <thrust/system/cuda/execution_policy.h>
+#include <exception>
+#include <stdexcept>
 
 namespace
 {
@@ -165,7 +166,8 @@ cudaError_t computeVolumeIntersectionOffsets(
     int b_row_count,
     int* d_counts,
     int* d_offsets,
-    int* total_intersections_count)
+    int* total_intersections_count,
+    cudaStream_t stream)
 {
     if (total_intersections_count) {
         *total_intersections_count = 0;
@@ -188,20 +190,20 @@ cudaError_t computeVolumeIntersectionOffsets(
     int threadsPerBlock = 256;
     int blocksPerGrid = (a_row_count + threadsPerBlock - 1) / threadsPerBlock;
 
-    row_intersection_count_kernel<<<blocksPerGrid, threadsPerBlock>>>(
+    row_intersection_count_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
         d_a_begin, d_a_end,
         d_a_row_offsets, a_row_count,
         d_b_begin, d_b_end,
         d_b_row_offsets, b_row_count,
         d_counts);
 
-    cudaError_t err = KERNEL_CHECK();
+    cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         return err;
     }
 
     thrust::exclusive_scan(
-        thrust::device,
+        thrust::cuda::par.on(stream),
         thrust::device_pointer_cast(d_counts),
         thrust::device_pointer_cast(d_counts + a_row_count),
         thrust::device_pointer_cast(d_offsets));
@@ -210,17 +212,23 @@ cudaError_t computeVolumeIntersectionOffsets(
     if (a_row_count > 0) {
         int last_offset = 0;
         int last_count = 0;
-        err = CUDA_CHECK(cudaMemcpy(&last_offset,
-                                    d_offsets + (a_row_count - 1),
-                                    sizeof(int),
-                                    cudaMemcpyDeviceToHost));
+        err = CUDA_CHECK(cudaMemcpyAsync(&last_offset,
+                                         d_offsets + (a_row_count - 1),
+                                         sizeof(int),
+                                         cudaMemcpyDeviceToHost,
+                                         stream));
         if (err != cudaSuccess) {
             return err;
         }
-        err = CUDA_CHECK(cudaMemcpy(&last_count,
-                                    d_counts + (a_row_count - 1),
-                                    sizeof(int),
-                                    cudaMemcpyDeviceToHost));
+        err = CUDA_CHECK(cudaMemcpyAsync(&last_count,
+                                         d_counts + (a_row_count - 1),
+                                         sizeof(int),
+                                         cudaMemcpyDeviceToHost,
+                                         stream));
+        if (err != cudaSuccess) {
+            return err;
+        }
+        err = cudaStreamSynchronize(stream);
         if (err != cudaSuccess) {
             return err;
         }
@@ -251,7 +259,8 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
     int* d_r_begin,
     int* d_r_end,
     int* d_a_idx,
-    int* d_b_idx)
+    int* d_b_idx,
+    cudaStream_t stream)
 {
     if (a_row_count <= 0 || b_row_count <= 0) {
         return cudaSuccess;
@@ -271,7 +280,7 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
     int threadsPerBlock = 256;
     int blocksPerGrid = (a_row_count + threadsPerBlock - 1) / threadsPerBlock;
 
-    row_intersection_write_kernel<<<blocksPerGrid, threadsPerBlock>>>(
+    row_intersection_write_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
         d_a_begin, d_a_end,
         d_a_row_offsets, a_row_count,
         d_b_begin, d_b_end,
@@ -285,7 +294,12 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
         d_a_idx,
         d_b_idx);
 
-    return KERNEL_CHECK();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    return cudaStreamSynchronize(stream);
 }
 
 cudaError_t computeIntervalIntersectionOffsets(
@@ -299,13 +313,15 @@ cudaError_t computeIntervalIntersectionOffsets(
     int b_y_count,
     int* d_counts,
     int* d_offsets,
-    int* total_intersections_count)
+    int* total_intersections_count,
+    cudaStream_t stream)
 {
     return computeVolumeIntersectionOffsets(
         d_a_begin, d_a_end, d_a_y_offsets, a_y_count,
         d_b_begin, d_b_end, d_b_y_offsets, b_y_count,
         d_counts, d_offsets,
-        total_intersections_count);
+        total_intersections_count,
+        stream);
 }
 
 cudaError_t writeIntervalIntersectionsWithOffsets(
@@ -322,7 +338,8 @@ cudaError_t writeIntervalIntersectionsWithOffsets(
     int* d_r_begin,
     int* d_r_end,
     int* d_a_idx,
-    int* d_b_idx)
+    int* d_b_idx,
+    cudaStream_t stream)
 {
     return writeVolumeIntersectionsWithOffsets(
         d_a_begin, d_a_end, d_a_y_offsets, a_y_count,
@@ -334,7 +351,8 @@ cudaError_t writeIntervalIntersectionsWithOffsets(
         d_r_begin,
         d_r_end,
         d_a_idx,
-        d_b_idx);
+        d_b_idx,
+        stream);
 }
 
 
@@ -345,7 +363,8 @@ cudaError_t findVolumeIntersections(
     const int* d_b_row_offsets, int b_row_count,
     int** d_r_z_idx, int** d_r_y_idx, int** d_r_begin, int** d_r_end,
     int** d_a_idx, int** d_b_idx,
-    int* total_intersections_count)
+    int* total_intersections_count,
+    cudaStream_t stream)
 {
     if (!d_r_y_idx || !d_r_begin || !d_r_end || !d_a_idx || !d_b_idx) {
         return cudaErrorInvalidValue;
@@ -393,7 +412,8 @@ cudaError_t findVolumeIntersections(
         d_b_begin, d_b_end, d_b_row_offsets, b_row_count,
         thrust::raw_pointer_cast(d_per_row_counts.data()),
         thrust::raw_pointer_cast(d_output_offsets.data()),
-        &computed_total);
+        &computed_total,
+        stream);
     if (err != cudaSuccess) {
         return err;
     }
@@ -484,7 +504,8 @@ cudaError_t findVolumeIntersections(
         *d_r_begin,
         *d_r_end,
         *d_a_idx,
-        *d_b_idx);
+        *d_b_idx,
+        stream);
 
     if (err != cudaSuccess) {
         cleanup_outputs();
@@ -501,7 +522,8 @@ cudaError_t findIntervalIntersections(
     const int* d_b_y_offsets, int b_y_count,
     int** d_r_y_idx, int** d_r_begin, int** d_r_end,
     int** d_a_idx, int** d_b_idx,
-    int* total_intersections_count)
+    int* total_intersections_count,
+    cudaStream_t stream)
 {
     if (!d_r_y_idx || !d_r_begin || !d_r_end || !d_a_idx || !d_b_idx) {
         return cudaErrorInvalidValue;
@@ -543,7 +565,8 @@ cudaError_t findIntervalIntersections(
         d_b_begin, d_b_end, d_b_y_offsets, b_y_count,
         thrust::raw_pointer_cast(d_counts.data()),
         thrust::raw_pointer_cast(d_offsets.data()),
-        &computed_total);
+        &computed_total,
+        stream);
     if (err != cudaSuccess) {
         return err;
     }
@@ -621,7 +644,8 @@ cudaError_t findIntervalIntersections(
         *d_r_begin,
         *d_r_end,
         *d_a_idx,
-        *d_b_idx);
+        *d_b_idx,
+        stream);
 
     if (err != cudaSuccess) {
         cleanup_outputs();
