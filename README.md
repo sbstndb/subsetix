@@ -22,8 +22,8 @@ API (device ptrs): voir `src/interval_intersection.cuh`
   - Lancement: `launch*Graph(exec, stream)` réutilisable; `destroy*Graph` nettoie. Voir `src/test_intersection.cu` pour le schéma double-graph (compute total → alloc résultats → write).
 
 ## Build rapide
-- Prérequis: CUDA (nvcc), Thrust, CMake, GTest.
-- Arch GPU (RTX 1000 Ada): `CMAKE_CUDA_ARCHITECTURES 89` (déjà réglé dans `CMakeLists.txt`).
+- Prérequis: CUDA Toolkit (nvcc), Thrust (fourni par CUDA), CMake (>= 3.18), GTest.
+- Arch GPU: `CMAKE_CUDA_ARCHITECTURES` est paramétrable; valeurs par défaut `75;86;89` si non spécifié.
 
 Commandes:
 ```bash
@@ -63,4 +63,3 @@ Notes:
 
 ## Limitations connues
 - Scénarios avec très peu de lignes simultanées peuvent sous-utiliser le GPU (un thread = une ligne).
-- CMake utilise `find_package(CUDA)` (déprécié) mais fonctionne; modernisation possible.
