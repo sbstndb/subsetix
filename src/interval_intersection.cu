@@ -6,6 +6,7 @@
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
 #include <thrust/system/cuda/execution_policy.h>
+#include <cub/device/device_scan.cuh>
 #include <exception>
 #include <stdexcept>
 
@@ -152,8 +153,200 @@ namespace
         }
     }
 
+    __global__ void write_total_from_prefix_kernel(const int* d_counts,
+                                                   const int* d_offsets,
+                                                   int row_count,
+                                                   int* d_total)
+    {
+        if (!d_total) {
+            return;
+        }
+        if (threadIdx.x == 0) {
+            int total = 0;
+            if (row_count > 0 && d_counts && d_offsets) {
+                total = d_offsets[row_count - 1] + d_counts[row_count - 1];
+            }
+            d_total[0] = total;
+        }
+    }
+
 } 
 
+
+cudaError_t enqueueVolumeIntersectionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    int* d_counts,
+    int* d_offsets,
+    cudaStream_t stream,
+    void* d_temp_storage,
+    size_t temp_storage_bytes)
+{
+    if (!d_counts || !d_offsets) {
+        return cudaErrorInvalidValue;
+    }
+    if (a_row_count < 0 || b_row_count < 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (a_row_count == 0 || b_row_count == 0) {
+        return cudaSuccess;
+    }
+    if (!d_a_begin || !d_a_end || !d_a_row_offsets ||
+        !d_b_begin || !d_b_end || !d_b_row_offsets) {
+        return cudaErrorInvalidValue;
+    }
+    if (a_row_count != b_row_count) {
+        return cudaErrorInvalidValue;
+    }
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (a_row_count + threadsPerBlock - 1) / threadsPerBlock;
+    cudaStream_t s = stream ? stream : nullptr;
+
+    row_intersection_count_kernel<<<blocksPerGrid, threadsPerBlock, 0, s>>>(
+        d_a_begin, d_a_end,
+        d_a_row_offsets, a_row_count,
+        d_b_begin, d_b_end,
+        d_b_row_offsets, b_row_count,
+        d_counts);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    if (d_temp_storage && temp_storage_bytes > 0) {
+        return cub::DeviceScan::ExclusiveSum(d_temp_storage,
+                                             temp_storage_bytes,
+                                             d_counts,
+                                             d_offsets,
+                                             a_row_count,
+                                             s);
+    }
+
+    thrust::exclusive_scan(
+        thrust::cuda::par.on(s),
+        thrust::device_pointer_cast(d_counts),
+        thrust::device_pointer_cast(d_counts + a_row_count),
+        thrust::device_pointer_cast(d_offsets));
+
+    return cudaSuccess;
+}
+
+cudaError_t enqueueVolumeIntersectionWrite(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    const int* d_a_row_to_y,
+    const int* d_a_row_to_z,
+    const int* d_offsets,
+    int* d_r_z_idx,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    int* d_a_idx,
+    int* d_b_idx,
+    cudaStream_t stream)
+{
+    if (a_row_count < 0 || b_row_count < 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (a_row_count == 0 || b_row_count == 0) {
+        return cudaSuccess;
+    }
+    if (!d_a_begin || !d_a_end || !d_a_row_offsets ||
+        !d_b_begin || !d_b_end || !d_b_row_offsets ||
+        !d_offsets || !d_r_y_idx || !d_r_begin || !d_r_end ||
+        !d_a_idx || !d_b_idx) {
+        return cudaErrorInvalidValue;
+    }
+    if (a_row_count != b_row_count) {
+        return cudaErrorInvalidValue;
+    }
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (a_row_count + threadsPerBlock - 1) / threadsPerBlock;
+    cudaStream_t s = stream ? stream : nullptr;
+
+    row_intersection_write_kernel<<<blocksPerGrid, threadsPerBlock, 0, s>>>(
+        d_a_begin, d_a_end,
+        d_a_row_offsets, a_row_count,
+        d_b_begin, d_b_end,
+        d_b_row_offsets, b_row_count,
+        d_a_row_to_y, d_a_row_to_z,
+        d_offsets,
+        d_r_z_idx,
+        d_r_y_idx,
+        d_r_begin,
+        d_r_end,
+        d_a_idx,
+        d_b_idx);
+
+    return cudaGetLastError();
+}
+
+cudaError_t enqueueIntervalIntersectionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    int* d_counts,
+    int* d_offsets,
+    cudaStream_t stream,
+    void* d_temp_storage,
+    size_t temp_storage_bytes)
+{
+    return enqueueVolumeIntersectionOffsets(
+        d_a_begin, d_a_end, d_a_y_offsets, a_y_count,
+        d_b_begin, d_b_end, d_b_y_offsets, b_y_count,
+        d_counts, d_offsets, stream, d_temp_storage, temp_storage_bytes);
+}
+
+cudaError_t enqueueIntervalIntersectionWrite(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    const int* d_offsets,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    int* d_a_idx,
+    int* d_b_idx,
+    cudaStream_t stream)
+{
+    return enqueueVolumeIntersectionWrite(
+        d_a_begin, d_a_end, d_a_y_offsets, a_y_count,
+        d_b_begin, d_b_end, d_b_y_offsets, b_y_count,
+        nullptr, nullptr,
+        d_offsets,
+        nullptr,
+        d_r_y_idx,
+        d_r_begin,
+        d_r_end,
+        d_a_idx,
+        d_b_idx,
+        stream);
+}
 
 cudaError_t computeVolumeIntersectionOffsets(
     const int* d_a_begin,
@@ -177,68 +370,48 @@ cudaError_t computeVolumeIntersectionOffsets(
         return cudaSuccess;
     }
 
-    if (!d_a_begin || !d_a_end || !d_a_row_offsets ||
-        !d_b_begin || !d_b_end || !d_b_row_offsets ||
-        !d_counts || !d_offsets) {
-        return cudaErrorInvalidValue;
-    }
-
-    if (a_row_count != b_row_count) {
-        return cudaErrorInvalidValue;
-    }
-
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (a_row_count + threadsPerBlock - 1) / threadsPerBlock;
-
-    row_intersection_count_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
-        d_a_begin, d_a_end,
-        d_a_row_offsets, a_row_count,
-        d_b_begin, d_b_end,
-        d_b_row_offsets, b_row_count,
-        d_counts);
-
-    cudaError_t err = cudaGetLastError();
+    cudaError_t err = enqueueVolumeIntersectionOffsets(
+        d_a_begin, d_a_end, d_a_row_offsets, a_row_count,
+        d_b_begin, d_b_end, d_b_row_offsets, b_row_count,
+        d_counts, d_offsets,
+        stream,
+        nullptr,
+        0);
     if (err != cudaSuccess) {
         return err;
     }
 
-    thrust::exclusive_scan(
-        thrust::cuda::par.on(stream),
-        thrust::device_pointer_cast(d_counts),
-        thrust::device_pointer_cast(d_counts + a_row_count),
-        thrust::device_pointer_cast(d_offsets));
+    cudaStream_t s = stream ? stream : nullptr;
 
-    int total = 0;
-    if (a_row_count > 0) {
-        int last_offset = 0;
-        int last_count = 0;
-        err = CUDA_CHECK(cudaMemcpyAsync(&last_offset,
-                                         d_offsets + (a_row_count - 1),
-                                         sizeof(int),
-                                         cudaMemcpyDeviceToHost,
-                                         stream));
-        if (err != cudaSuccess) {
-            return err;
-        }
-        err = CUDA_CHECK(cudaMemcpyAsync(&last_count,
-                                         d_counts + (a_row_count - 1),
-                                         sizeof(int),
-                                         cudaMemcpyDeviceToHost,
-                                         stream));
-        if (err != cudaSuccess) {
-            return err;
-        }
-        err = cudaStreamSynchronize(stream);
-        if (err != cudaSuccess) {
-            return err;
-        }
-        total = last_offset + last_count;
+    if (!total_intersections_count) {
+        return cudaStreamSynchronize(s);
     }
 
-    if (total_intersections_count) {
-        *total_intersections_count = total;
+    int last_offset = 0;
+    int last_count = 0;
+    err = CUDA_CHECK(cudaMemcpyAsync(&last_offset,
+                                     d_offsets + (a_row_count - 1),
+                                     sizeof(int),
+                                     cudaMemcpyDeviceToHost,
+                                     s));
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = CUDA_CHECK(cudaMemcpyAsync(&last_count,
+                                     d_counts + (a_row_count - 1),
+                                     sizeof(int),
+                                     cudaMemcpyDeviceToHost,
+                                     s));
+    if (err != cudaSuccess) {
+        return err;
     }
 
+    err = cudaStreamSynchronize(s);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    *total_intersections_count = last_offset + last_count;
     return cudaSuccess;
 }
 
@@ -266,25 +439,9 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
         return cudaSuccess;
     }
 
-    if (!d_a_begin || !d_a_end || !d_a_row_offsets ||
-        !d_b_begin || !d_b_end || !d_b_row_offsets ||
-        !d_offsets || !d_r_y_idx || !d_r_begin || !d_r_end ||
-        !d_a_idx || !d_b_idx) {
-        return cudaErrorInvalidValue;
-    }
-
-    if (a_row_count != b_row_count) {
-        return cudaErrorInvalidValue;
-    }
-
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (a_row_count + threadsPerBlock - 1) / threadsPerBlock;
-
-    row_intersection_write_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
-        d_a_begin, d_a_end,
-        d_a_row_offsets, a_row_count,
-        d_b_begin, d_b_end,
-        d_b_row_offsets, b_row_count,
+    cudaError_t err = enqueueVolumeIntersectionWrite(
+        d_a_begin, d_a_end, d_a_row_offsets, a_row_count,
+        d_b_begin, d_b_end, d_b_row_offsets, b_row_count,
         d_a_row_to_y, d_a_row_to_z,
         d_offsets,
         d_r_z_idx,
@@ -292,14 +449,14 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
         d_r_begin,
         d_r_end,
         d_a_idx,
-        d_b_idx);
-
-    cudaError_t err = cudaGetLastError();
+        d_b_idx,
+        stream);
     if (err != cudaSuccess) {
         return err;
     }
 
-    return cudaStreamSynchronize(stream);
+    cudaStream_t s = stream ? stream : nullptr;
+    return cudaStreamSynchronize(s);
 }
 
 cudaError_t computeIntervalIntersectionOffsets(
@@ -353,6 +510,507 @@ cudaError_t writeIntervalIntersectionsWithOffsets(
         d_a_idx,
         d_b_idx,
         stream);
+}
+
+
+cudaError_t createIntervalIntersectionOffsetsGraph(IntervalIntersectionGraph* graph,
+                                                   const IntervalIntersectionOffsetsGraphConfig& config,
+                                                   cudaStream_t stream)
+{
+    if (!graph) {
+        return cudaErrorInvalidValue;
+    }
+
+    destroyIntervalIntersectionGraph(graph);
+
+    if (config.a_y_count < 0 || config.b_y_count < 0 ||
+        config.a_y_count != config.b_y_count) {
+        return cudaErrorInvalidValue;
+    }
+
+    const bool has_rows = config.a_y_count > 0;
+    if (has_rows) {
+        if (!config.d_a_begin || !config.d_a_end || !config.d_a_y_offsets ||
+            !config.d_b_begin || !config.d_b_end || !config.d_b_y_offsets ||
+            !config.d_counts || !config.d_offsets ||
+            !config.d_scan_temp_storage || config.scan_temp_storage_bytes == 0) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    cudaStream_t capture_stream = stream;
+    bool owns_stream = false;
+    if (!capture_stream) {
+        cudaError_t err_create = cudaStreamCreate(&capture_stream);
+        if (err_create != cudaSuccess) {
+            return err_create;
+        }
+        owns_stream = true;
+    }
+
+    cudaError_t err = cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeGlobal);
+    if (err != cudaSuccess) {
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    if (has_rows) {
+        err = enqueueIntervalIntersectionOffsets(
+            config.d_a_begin, config.d_a_end, config.d_a_y_offsets, config.a_y_count,
+            config.d_b_begin, config.d_b_end, config.d_b_y_offsets, config.b_y_count,
+            config.d_counts, config.d_offsets,
+            capture_stream,
+            config.d_scan_temp_storage,
+            config.scan_temp_storage_bytes);
+        if (err != cudaSuccess) {
+            cudaStreamEndCapture(capture_stream, nullptr);
+            if (owns_stream) {
+                cudaStreamDestroy(capture_stream);
+            }
+            return err;
+        }
+
+        if (config.d_total) {
+            write_total_from_prefix_kernel<<<1, 1, 0, capture_stream>>>(
+                config.d_counts,
+                config.d_offsets,
+                config.a_y_count,
+                config.d_total);
+            err = cudaGetLastError();
+            if (err != cudaSuccess) {
+                cudaStreamEndCapture(capture_stream, nullptr);
+                if (owns_stream) {
+                    cudaStreamDestroy(capture_stream);
+                }
+                return err;
+            }
+        }
+    } else if (config.d_total) {
+        write_total_from_prefix_kernel<<<1, 1, 0, capture_stream>>>(
+            nullptr,
+            nullptr,
+            0,
+            config.d_total);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            cudaStreamEndCapture(capture_stream, nullptr);
+            if (owns_stream) {
+                cudaStreamDestroy(capture_stream);
+            }
+            return err;
+        }
+    }
+
+    cudaGraph_t captured_graph = nullptr;
+    err = cudaStreamEndCapture(capture_stream, &captured_graph);
+    if (err != cudaSuccess) {
+        if (captured_graph) {
+            cudaGraphDestroy(captured_graph);
+        }
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    err = cudaGraphInstantiate(&exec, captured_graph, nullptr, nullptr, 0);
+    if (err != cudaSuccess) {
+        cudaGraphDestroy(captured_graph);
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    graph->graph = captured_graph;
+    graph->exec = exec;
+    graph->stream = capture_stream;
+    graph->owns_stream = owns_stream;
+    return cudaSuccess;
+}
+
+cudaError_t createIntervalIntersectionWriteGraph(IntervalIntersectionGraph* graph,
+                                                 const IntervalIntersectionWriteGraphConfig& config,
+                                                 cudaStream_t stream)
+{
+    if (!graph) {
+        return cudaErrorInvalidValue;
+    }
+
+    destroyIntervalIntersectionGraph(graph);
+
+    if (config.a_y_count < 0 || config.b_y_count < 0 ||
+        config.a_y_count != config.b_y_count ||
+        config.total_capacity < 0) {
+        return cudaErrorInvalidValue;
+    }
+
+    const bool has_rows = config.a_y_count > 0;
+    const bool has_outputs = config.total_capacity > 0;
+    if (has_rows) {
+        if (!config.d_a_begin || !config.d_a_end || !config.d_a_y_offsets ||
+            !config.d_b_begin || !config.d_b_end || !config.d_b_y_offsets ||
+            !config.d_offsets) {
+            return cudaErrorInvalidValue;
+        }
+        if (has_outputs) {
+            if (!config.d_r_y_idx || !config.d_r_begin || !config.d_r_end ||
+                !config.d_a_idx || !config.d_b_idx) {
+                return cudaErrorInvalidValue;
+            }
+        }
+    }
+
+    cudaStream_t capture_stream = stream;
+    bool owns_stream = false;
+    if (!capture_stream) {
+        cudaError_t err_create = cudaStreamCreate(&capture_stream);
+        if (err_create != cudaSuccess) {
+            return err_create;
+        }
+        owns_stream = true;
+    }
+
+    cudaError_t err = cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeGlobal);
+    if (err != cudaSuccess) {
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    if (has_rows && has_outputs) {
+        err = enqueueIntervalIntersectionWrite(
+            config.d_a_begin, config.d_a_end, config.d_a_y_offsets, config.a_y_count,
+            config.d_b_begin, config.d_b_end, config.d_b_y_offsets, config.b_y_count,
+            config.d_offsets,
+            config.d_r_y_idx,
+            config.d_r_begin,
+            config.d_r_end,
+            config.d_a_idx,
+            config.d_b_idx,
+            capture_stream);
+        if (err != cudaSuccess) {
+            cudaStreamEndCapture(capture_stream, nullptr);
+            if (owns_stream) {
+                cudaStreamDestroy(capture_stream);
+            }
+            return err;
+        }
+    }
+
+    cudaGraph_t captured_graph = nullptr;
+    err = cudaStreamEndCapture(capture_stream, &captured_graph);
+    if (err != cudaSuccess) {
+        if (captured_graph) {
+            cudaGraphDestroy(captured_graph);
+        }
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    err = cudaGraphInstantiate(&exec, captured_graph, nullptr, nullptr, 0);
+    if (err != cudaSuccess) {
+        cudaGraphDestroy(captured_graph);
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    graph->graph = captured_graph;
+    graph->exec = exec;
+    graph->stream = capture_stream;
+    graph->owns_stream = owns_stream;
+    return cudaSuccess;
+}
+
+cudaError_t launchIntervalIntersectionGraph(const IntervalIntersectionGraph& graph,
+                                            cudaStream_t stream)
+{
+    if (!graph.exec) {
+        return cudaErrorInvalidValue;
+    }
+    cudaStream_t launch_stream = stream ? stream : graph.stream;
+    return cudaGraphLaunch(graph.exec, launch_stream);
+}
+
+void destroyIntervalIntersectionGraph(IntervalIntersectionGraph* graph)
+{
+    if (!graph) {
+        return;
+    }
+    if (graph->exec) {
+        cudaGraphExecDestroy(graph->exec);
+    }
+    if (graph->graph) {
+        cudaGraphDestroy(graph->graph);
+    }
+    if (graph->owns_stream && graph->stream) {
+        cudaStreamDestroy(graph->stream);
+    }
+    graph->graph = nullptr;
+    graph->exec = nullptr;
+    graph->stream = nullptr;
+    graph->owns_stream = false;
+}
+
+cudaError_t createVolumeIntersectionOffsetsGraph(VolumeIntersectionGraph* graph,
+                                                 const VolumeIntersectionOffsetsGraphConfig& config,
+                                                 cudaStream_t stream)
+{
+    if (!graph) {
+        return cudaErrorInvalidValue;
+    }
+
+    destroyVolumeIntersectionGraph(graph);
+
+    if (config.a_row_count < 0 || config.b_row_count < 0 ||
+        config.a_row_count != config.b_row_count) {
+        return cudaErrorInvalidValue;
+    }
+
+    const bool has_rows = config.a_row_count > 0;
+    if (has_rows) {
+        if (!config.d_a_begin || !config.d_a_end || !config.d_a_row_offsets ||
+            !config.d_b_begin || !config.d_b_end || !config.d_b_row_offsets ||
+            !config.d_counts || !config.d_offsets ||
+            !config.d_scan_temp_storage || config.scan_temp_storage_bytes == 0) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    cudaStream_t capture_stream = stream;
+    bool owns_stream = false;
+    if (!capture_stream) {
+        cudaError_t err_create = cudaStreamCreate(&capture_stream);
+        if (err_create != cudaSuccess) {
+            return err_create;
+        }
+        owns_stream = true;
+    }
+
+    cudaError_t err = cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeGlobal);
+    if (err != cudaSuccess) {
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    if (has_rows) {
+        err = enqueueVolumeIntersectionOffsets(
+            config.d_a_begin, config.d_a_end, config.d_a_row_offsets, config.a_row_count,
+            config.d_b_begin, config.d_b_end, config.d_b_row_offsets, config.b_row_count,
+            config.d_counts, config.d_offsets,
+            capture_stream,
+            config.d_scan_temp_storage,
+            config.scan_temp_storage_bytes);
+        if (err != cudaSuccess) {
+            cudaStreamEndCapture(capture_stream, nullptr);
+            if (owns_stream) {
+                cudaStreamDestroy(capture_stream);
+            }
+            return err;
+        }
+
+        if (config.d_total) {
+            write_total_from_prefix_kernel<<<1, 1, 0, capture_stream>>>(
+                config.d_counts,
+                config.d_offsets,
+                config.a_row_count,
+                config.d_total);
+            err = cudaGetLastError();
+            if (err != cudaSuccess) {
+                cudaStreamEndCapture(capture_stream, nullptr);
+                if (owns_stream) {
+                    cudaStreamDestroy(capture_stream);
+                }
+                return err;
+            }
+        }
+    } else if (config.d_total) {
+        write_total_from_prefix_kernel<<<1, 1, 0, capture_stream>>>(
+            nullptr,
+            nullptr,
+            0,
+            config.d_total);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            cudaStreamEndCapture(capture_stream, nullptr);
+            if (owns_stream) {
+                cudaStreamDestroy(capture_stream);
+            }
+            return err;
+        }
+    }
+
+    cudaGraph_t captured_graph = nullptr;
+    err = cudaStreamEndCapture(capture_stream, &captured_graph);
+    if (err != cudaSuccess) {
+        if (captured_graph) {
+            cudaGraphDestroy(captured_graph);
+        }
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    err = cudaGraphInstantiate(&exec, captured_graph, nullptr, nullptr, 0);
+    if (err != cudaSuccess) {
+        cudaGraphDestroy(captured_graph);
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    graph->graph = captured_graph;
+    graph->exec = exec;
+    graph->stream = capture_stream;
+    graph->owns_stream = owns_stream;
+    return cudaSuccess;
+}
+
+cudaError_t createVolumeIntersectionWriteGraph(VolumeIntersectionGraph* graph,
+                                               const VolumeIntersectionWriteGraphConfig& config,
+                                               cudaStream_t stream)
+{
+    if (!graph) {
+        return cudaErrorInvalidValue;
+    }
+
+    destroyVolumeIntersectionGraph(graph);
+
+    if (config.a_row_count < 0 || config.b_row_count < 0 ||
+        config.a_row_count != config.b_row_count ||
+        config.total_capacity < 0) {
+        return cudaErrorInvalidValue;
+    }
+
+    const bool has_rows = config.a_row_count > 0;
+    const bool has_outputs = config.total_capacity > 0;
+
+    if (has_rows) {
+        if (!config.d_a_begin || !config.d_a_end || !config.d_a_row_offsets ||
+            !config.d_b_begin || !config.d_b_end || !config.d_b_row_offsets ||
+            !config.d_offsets) {
+            return cudaErrorInvalidValue;
+        }
+
+        if (has_outputs) {
+            if (!config.d_r_z_idx || !config.d_r_y_idx || !config.d_r_begin ||
+                !config.d_r_end || !config.d_a_idx || !config.d_b_idx) {
+                return cudaErrorInvalidValue;
+            }
+        }
+    }
+
+    cudaStream_t capture_stream = stream;
+    bool owns_stream = false;
+    if (!capture_stream) {
+        cudaError_t err_create = cudaStreamCreate(&capture_stream);
+        if (err_create != cudaSuccess) {
+            return err_create;
+        }
+        owns_stream = true;
+    }
+
+    cudaError_t err = cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeGlobal);
+    if (err != cudaSuccess) {
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    if (has_rows && has_outputs) {
+        err = enqueueVolumeIntersectionWrite(
+            config.d_a_begin, config.d_a_end, config.d_a_row_offsets, config.a_row_count,
+            config.d_b_begin, config.d_b_end, config.d_b_row_offsets, config.b_row_count,
+            config.d_a_row_to_y, config.d_a_row_to_z,
+            config.d_offsets,
+            config.d_r_z_idx,
+            config.d_r_y_idx,
+            config.d_r_begin,
+            config.d_r_end,
+            config.d_a_idx,
+            config.d_b_idx,
+            capture_stream);
+        if (err != cudaSuccess) {
+            cudaStreamEndCapture(capture_stream, nullptr);
+            if (owns_stream) {
+                cudaStreamDestroy(capture_stream);
+            }
+            return err;
+        }
+    }
+
+    cudaGraph_t captured_graph = nullptr;
+    err = cudaStreamEndCapture(capture_stream, &captured_graph);
+    if (err != cudaSuccess) {
+        if (captured_graph) {
+            cudaGraphDestroy(captured_graph);
+        }
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    err = cudaGraphInstantiate(&exec, captured_graph, nullptr, nullptr, 0);
+    if (err != cudaSuccess) {
+        cudaGraphDestroy(captured_graph);
+        if (owns_stream) {
+            cudaStreamDestroy(capture_stream);
+        }
+        return err;
+    }
+
+    graph->graph = captured_graph;
+    graph->exec = exec;
+    graph->stream = capture_stream;
+    graph->owns_stream = owns_stream;
+    return cudaSuccess;
+}
+
+cudaError_t launchVolumeIntersectionGraph(const VolumeIntersectionGraph& graph,
+                                          cudaStream_t stream)
+{
+    if (!graph.exec) {
+        return cudaErrorInvalidValue;
+    }
+    cudaStream_t launch_stream = stream ? stream : graph.stream;
+    return cudaGraphLaunch(graph.exec, launch_stream);
+}
+
+void destroyVolumeIntersectionGraph(VolumeIntersectionGraph* graph)
+{
+    if (!graph) {
+        return;
+    }
+    if (graph->exec) {
+        cudaGraphExecDestroy(graph->exec);
+    }
+    if (graph->graph) {
+        cudaGraphDestroy(graph->graph);
+    }
+    if (graph->owns_stream && graph->stream) {
+        cudaStreamDestroy(graph->stream);
+    }
+    graph->graph = nullptr;
+    graph->exec = nullptr;
+    graph->stream = nullptr;
+    graph->owns_stream = false;
 }
 
 

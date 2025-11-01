@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <vector>
+#include <cub/device/device_scan.cuh>
 
 #include "interval_intersection.cuh"
 #include "cuda_utils.cuh"
@@ -361,6 +362,150 @@ float benchmarkWorkspaceMultiStream2D(const SurfaceDevice& a,
     return ms / (iterations * stream_count);
 }
 
+float benchmarkGraph2D(const SurfaceDevice& a,
+                       const SurfaceDevice& b,
+                       int iterations) {
+    if (a.row_count != b.row_count) {
+        return 0.0f;
+    }
+
+    int* d_counts = nullptr;
+    int* d_offsets = nullptr;
+    if (a.row_count > 0) {
+        const size_t row_bytes = static_cast<size_t>(a.row_count) * sizeof(int);
+        CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
+        CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+    }
+
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    if (a.row_count > 0) {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(nullptr,
+                                                 temp_storage_bytes,
+                                                 d_counts,
+                                                 d_offsets,
+                                                 a.row_count));
+        CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    }
+
+    int* d_total = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_total, sizeof(int)));
+
+    cudaStream_t graph_stream;
+    CUDA_CHECK(cudaStreamCreate(&graph_stream));
+
+    IntervalIntersectionOffsetsGraphConfig offsets_cfg{};
+    offsets_cfg.d_a_begin = a.begin;
+    offsets_cfg.d_a_end = a.end;
+    offsets_cfg.d_a_y_offsets = a.offsets;
+    offsets_cfg.a_y_count = a.row_count;
+    offsets_cfg.d_b_begin = b.begin;
+    offsets_cfg.d_b_end = b.end;
+    offsets_cfg.d_b_y_offsets = b.offsets;
+    offsets_cfg.b_y_count = b.row_count;
+    offsets_cfg.d_counts = d_counts;
+    offsets_cfg.d_offsets = d_offsets;
+    offsets_cfg.d_scan_temp_storage = d_temp_storage;
+    offsets_cfg.scan_temp_storage_bytes = temp_storage_bytes;
+    offsets_cfg.d_total = d_total;
+
+    IntervalIntersectionGraph offsets_graph{};
+    cudaError_t err = createIntervalIntersectionOffsetsGraph(&offsets_graph, offsets_cfg, graph_stream);
+    if (err != cudaSuccess) {
+        printf("createIntervalIntersectionOffsetsGraph failed: %s\n", cudaGetErrorString(err));
+        if (d_temp_storage) CUDA_CHECK(cudaFree(d_temp_storage));
+        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+        if (d_total) CUDA_CHECK(cudaFree(d_total));
+        CUDA_CHECK(cudaStreamDestroy(graph_stream));
+        return 0.0f;
+    }
+
+    err = launchIntervalIntersectionGraph(offsets_graph, graph_stream);
+    if (err != cudaSuccess) {
+        printf("launchIntervalIntersectionGraph (offsets) failed: %s\n", cudaGetErrorString(err));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(graph_stream));
+
+    int total = 0;
+    CUDA_CHECK(cudaMemcpy(&total, d_total, sizeof(int), cudaMemcpyDeviceToHost));
+
+    ResultBuffers buffers = allocResults(total);
+
+    IntervalIntersectionWriteGraphConfig write_cfg{};
+    write_cfg.d_a_begin = a.begin;
+    write_cfg.d_a_end = a.end;
+    write_cfg.d_a_y_offsets = a.offsets;
+    write_cfg.a_y_count = a.row_count;
+    write_cfg.d_b_begin = b.begin;
+    write_cfg.d_b_end = b.end;
+    write_cfg.d_b_y_offsets = b.offsets;
+    write_cfg.b_y_count = b.row_count;
+    write_cfg.d_offsets = d_offsets;
+    write_cfg.d_r_y_idx = buffers.y_idx;
+    write_cfg.d_r_begin = buffers.begin;
+    write_cfg.d_r_end = buffers.end;
+    write_cfg.d_a_idx = buffers.a_idx;
+    write_cfg.d_b_idx = buffers.b_idx;
+    write_cfg.total_capacity = total;
+
+    IntervalIntersectionGraph write_graph{};
+    err = createIntervalIntersectionWriteGraph(&write_graph, write_cfg, graph_stream);
+    if (err != cudaSuccess) {
+        printf("createIntervalIntersectionWriteGraph failed: %s\n", cudaGetErrorString(err));
+        destroyIntervalIntersectionGraph(&offsets_graph);
+        freeResults(buffers);
+        if (d_temp_storage) CUDA_CHECK(cudaFree(d_temp_storage));
+        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+        if (d_total) CUDA_CHECK(cudaFree(d_total));
+        CUDA_CHECK(cudaStreamDestroy(graph_stream));
+        return 0.0f;
+    }
+
+    // Warm-up write path to ensure buffers are populated at least once.
+    err = launchIntervalIntersectionGraph(write_graph, graph_stream);
+    if (err != cudaSuccess) {
+        printf("launchIntervalIntersectionGraph (write warm-up) failed: %s\n", cudaGetErrorString(err));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(graph_stream));
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start, graph_stream));
+    for (int i = 0; i < iterations; ++i) {
+        err = launchIntervalIntersectionGraph(offsets_graph, graph_stream);
+        if (err != cudaSuccess) {
+            printf("launchIntervalIntersectionGraph (offsets) failed: %s\n", cudaGetErrorString(err));
+            break;
+        }
+        err = launchIntervalIntersectionGraph(write_graph, graph_stream);
+        if (err != cudaSuccess) {
+            printf("launchIntervalIntersectionGraph (write) failed: %s\n", cudaGetErrorString(err));
+            break;
+        }
+    }
+    CUDA_CHECK(cudaEventRecord(stop, graph_stream));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    destroyIntervalIntersectionGraph(&write_graph);
+    destroyIntervalIntersectionGraph(&offsets_graph);
+    freeResults(buffers);
+    if (d_temp_storage) CUDA_CHECK(cudaFree(d_temp_storage));
+    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+    if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+    if (d_total) CUDA_CHECK(cudaFree(d_total));
+    CUDA_CHECK(cudaStreamDestroy(graph_stream));
+    return ms / iterations;
+}
+
 float benchmarkClassic3D(const VolumeDevice& a,
                          const VolumeDevice& b,
                          int iterations) {
@@ -565,6 +710,152 @@ float benchmarkWorkspaceMultiStream3D(const VolumeDevice& a,
     return ms / (iterations * stream_count);
 }
 
+float benchmarkGraph3D(const VolumeDevice& a,
+                       const VolumeDevice& b,
+                       int iterations) {
+    if (a.row_count != b.row_count) {
+        return 0.0f;
+    }
+
+    int* d_counts = nullptr;
+    int* d_offsets = nullptr;
+    if (a.row_count > 0) {
+        const size_t row_bytes = static_cast<size_t>(a.row_count) * sizeof(int);
+        CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
+        CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+    }
+
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    if (a.row_count > 0) {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(nullptr,
+                                                 temp_storage_bytes,
+                                                 d_counts,
+                                                 d_offsets,
+                                                 a.row_count));
+        CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    }
+
+    int* d_total = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_total, sizeof(int)));
+
+    cudaStream_t graph_stream;
+    CUDA_CHECK(cudaStreamCreate(&graph_stream));
+
+    VolumeIntersectionOffsetsGraphConfig offsets_cfg{};
+    offsets_cfg.d_a_begin = a.begin;
+    offsets_cfg.d_a_end = a.end;
+    offsets_cfg.d_a_row_offsets = a.offsets;
+    offsets_cfg.a_row_count = a.row_count;
+    offsets_cfg.d_b_begin = b.begin;
+    offsets_cfg.d_b_end = b.end;
+    offsets_cfg.d_b_row_offsets = b.offsets;
+    offsets_cfg.b_row_count = b.row_count;
+    offsets_cfg.d_counts = d_counts;
+    offsets_cfg.d_offsets = d_offsets;
+    offsets_cfg.d_scan_temp_storage = d_temp_storage;
+    offsets_cfg.scan_temp_storage_bytes = temp_storage_bytes;
+    offsets_cfg.d_total = d_total;
+
+    VolumeIntersectionGraph offsets_graph{};
+    cudaError_t err = createVolumeIntersectionOffsetsGraph(&offsets_graph, offsets_cfg, graph_stream);
+    if (err != cudaSuccess) {
+        printf("createVolumeIntersectionOffsetsGraph failed: %s\n", cudaGetErrorString(err));
+        if (d_temp_storage) CUDA_CHECK(cudaFree(d_temp_storage));
+        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+        if (d_total) CUDA_CHECK(cudaFree(d_total));
+        CUDA_CHECK(cudaStreamDestroy(graph_stream));
+        return 0.0f;
+    }
+
+    err = launchVolumeIntersectionGraph(offsets_graph, graph_stream);
+    if (err != cudaSuccess) {
+        printf("launchVolumeIntersectionGraph (offsets) failed: %s\n", cudaGetErrorString(err));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(graph_stream));
+
+    int total = 0;
+    CUDA_CHECK(cudaMemcpy(&total, d_total, sizeof(int), cudaMemcpyDeviceToHost));
+
+    ResultBuffers buffers = allocResults(total);
+
+    VolumeIntersectionWriteGraphConfig write_cfg{};
+    write_cfg.d_a_begin = a.begin;
+    write_cfg.d_a_end = a.end;
+    write_cfg.d_a_row_offsets = a.offsets;
+    write_cfg.a_row_count = a.row_count;
+    write_cfg.d_a_row_to_y = a.row_to_y;
+    write_cfg.d_a_row_to_z = a.row_to_z;
+    write_cfg.d_b_begin = b.begin;
+    write_cfg.d_b_end = b.end;
+    write_cfg.d_b_row_offsets = b.offsets;
+    write_cfg.b_row_count = b.row_count;
+    write_cfg.d_offsets = d_offsets;
+    write_cfg.d_r_z_idx = buffers.z_idx;
+    write_cfg.d_r_y_idx = buffers.y_idx;
+    write_cfg.d_r_begin = buffers.begin;
+    write_cfg.d_r_end = buffers.end;
+    write_cfg.d_a_idx = buffers.a_idx;
+    write_cfg.d_b_idx = buffers.b_idx;
+    write_cfg.total_capacity = total;
+
+    VolumeIntersectionGraph write_graph{};
+    err = createVolumeIntersectionWriteGraph(&write_graph, write_cfg, graph_stream);
+    if (err != cudaSuccess) {
+        printf("createVolumeIntersectionWriteGraph failed: %s\n", cudaGetErrorString(err));
+        destroyVolumeIntersectionGraph(&offsets_graph);
+        freeResults(buffers);
+        if (d_temp_storage) CUDA_CHECK(cudaFree(d_temp_storage));
+        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+        if (d_total) CUDA_CHECK(cudaFree(d_total));
+        CUDA_CHECK(cudaStreamDestroy(graph_stream));
+        return 0.0f;
+    }
+
+    err = launchVolumeIntersectionGraph(write_graph, graph_stream);
+    if (err != cudaSuccess) {
+        printf("launchVolumeIntersectionGraph (write warm-up) failed: %s\n", cudaGetErrorString(err));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(graph_stream));
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start, graph_stream));
+    for (int i = 0; i < iterations; ++i) {
+        err = launchVolumeIntersectionGraph(offsets_graph, graph_stream);
+        if (err != cudaSuccess) {
+            printf("launchVolumeIntersectionGraph (offsets) failed: %s\n", cudaGetErrorString(err));
+            break;
+        }
+        err = launchVolumeIntersectionGraph(write_graph, graph_stream);
+        if (err != cudaSuccess) {
+            printf("launchVolumeIntersectionGraph (write) failed: %s\n", cudaGetErrorString(err));
+            break;
+        }
+    }
+    CUDA_CHECK(cudaEventRecord(stop, graph_stream));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    destroyVolumeIntersectionGraph(&write_graph);
+    destroyVolumeIntersectionGraph(&offsets_graph);
+    freeResults(buffers);
+    if (d_temp_storage) CUDA_CHECK(cudaFree(d_temp_storage));
+    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+    if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+    if (d_total) CUDA_CHECK(cudaFree(d_total));
+    CUDA_CHECK(cudaStreamDestroy(graph_stream));
+    return ms / iterations;
+}
+
 } // namespace
 
 int main() {
@@ -591,25 +882,31 @@ int main() {
     float classic2D = benchmarkClassic2D(rect, circ, iterations);
     float workspace2D = benchmarkWorkspaceStream2D(rect, circ, iterations);
     float multiStream2D = benchmarkWorkspaceMultiStream2D(rect, circ, iterations, stream_count);
+    float graph2D = benchmarkGraph2D(rect, circ, iterations);
 
     float classic3D = benchmarkClassic3D(box, sph, iterations);
     float workspace3D = benchmarkWorkspaceStream3D(box, sph, iterations);
     float multiStream3D = benchmarkWorkspaceMultiStream3D(box, sph, iterations, stream_count);
+    float graph3D = benchmarkGraph3D(box, sph, iterations);
 
     float classic3DSmall = benchmarkClassic3D(boxSmall, sphSmall, iterations);
     float workspace3DSmall = benchmarkWorkspaceStream3D(boxSmall, sphSmall, iterations);
     float multiStream3DSmall = benchmarkWorkspaceMultiStream3D(boxSmall, sphSmall, iterations, stream_count);
+    float graph3DSmall = benchmarkGraph3D(boxSmall, sphSmall, iterations);
 
     printf("Benchmark (%d iterations)\n", iterations);
     printf("2D classic:   %.3f ms/iter\n", classic2D);
     printf("2D workspace: %.3f ms/iter\n", workspace2D);
     printf("2D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream2D);
+    printf("2D graph:     %.3f ms/iter\n", graph2D);
     printf("3D classic:   %.3f ms/iter\n", classic3D);
     printf("3D workspace: %.3f ms/iter\n", workspace3D);
     printf("3D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3D);
+    printf("3D graph:     %.3f ms/iter\n", graph3D);
     printf("3D SMALL classic:   %.3f ms/iter\n", classic3DSmall);
     printf("3D SMALL workspace: %.3f ms/iter\n", workspace3DSmall);
     printf("3D SMALL workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3DSmall);
+    printf("3D SMALL graph:     %.3f ms/iter\n", graph3DSmall);
 
     freeSurface(rect);
     freeSurface(circ);

@@ -16,6 +16,10 @@ API (device ptrs): voir `src/interval_intersection.cuh`
 - 2D: `findIntervalIntersections(...)` avec offsets par y.
 - 3D: `findVolumeIntersections(...)` avec offsets par ligne et maps y/z.
 - Réutilisation sans `cudaMalloc`: `compute*IntersectionOffsets(...)` + `write*IntersectionsWithOffsets(...)` (buffers `counts/offsets` fournis par l'appelant, `cudaStream_t` optionnel).
+- CUDA Graphs: capturer les deux passes avec préallocation
+  - Offsets: `create{Interval|Volume}IntersectionOffsetsGraph(...)` (requiert `counts`, `offsets`, workspace CUB et, optionnellement, `d_total`).
+  - Écriture: `create{Interval|Volume}IntersectionWriteGraph(...)` (consomme `offsets` + buffers résultats déjà alloués).
+  - Lancement: `launch*Graph(exec, stream)` réutilisable; `destroy*Graph` nettoie. Voir `src/test_intersection.cu` pour le schéma double-graph (compute total → alloc résultats → write).
 
 ## Build rapide
 - Prérequis: CUDA (nvcc), Thrust, CMake, GTest.
