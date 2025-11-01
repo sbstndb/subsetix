@@ -506,6 +506,328 @@ float benchmarkGraph2D(const SurfaceDevice& a,
     return ms / iterations;
 }
 
+float benchmarkClassic2DSequence(
+    const std::vector<std::pair<const SurfaceDevice*, const SurfaceDevice*>>& pairs,
+    int iterations) {
+    if (pairs.empty()) {
+        return 0.0f;
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (const auto& pair : pairs) {
+            const SurfaceDevice* a = pair.first;
+            const SurfaceDevice* b = pair.second;
+            if (!a || !b) {
+                continue;
+            }
+
+            int* d_r_y_idx = nullptr;
+            int* d_r_begin = nullptr;
+            int* d_r_end = nullptr;
+            int* d_a_idx = nullptr;
+            int* d_b_idx = nullptr;
+            int total = 0;
+
+            cudaError_t err = findIntervalIntersections(
+                a->begin, a->end, a->interval_count,
+                a->offsets, a->row_count,
+                b->begin, b->end, b->interval_count,
+                b->offsets, b->row_count,
+                &d_r_y_idx, &d_r_begin, &d_r_end,
+                &d_a_idx, &d_b_idx,
+                &total);
+            if (err != cudaSuccess) {
+                printf("findIntervalIntersections (sequence 2D) failed: %s\n", cudaGetErrorString(err));
+            }
+            freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    return ms / iterations;
+}
+
+float benchmarkWorkspace2DSequence(
+    const std::vector<std::pair<const SurfaceDevice*, const SurfaceDevice*>>& pairs,
+    int iterations) {
+    if (pairs.empty()) {
+        return 0.0f;
+    }
+
+    struct Context {
+        int* d_counts = nullptr;
+        int* d_offsets = nullptr;
+        ResultBuffers buffers;
+        cudaStream_t stream = nullptr;
+        int total = 0;
+        int row_count = 0;
+    };
+
+    std::vector<Context> contexts(pairs.size());
+
+    for (size_t idx = 0; idx < pairs.size(); ++idx) {
+        const SurfaceDevice* a = pairs[idx].first;
+        const SurfaceDevice* b = pairs[idx].second;
+        Context& ctx = contexts[idx];
+        if (!a || !b) {
+            continue;
+        }
+        ctx.row_count = a->row_count;
+        if (ctx.row_count > 0) {
+            const size_t row_bytes = static_cast<size_t>(ctx.row_count) * sizeof(int);
+            CUDA_CHECK(cudaMalloc(&ctx.d_counts, row_bytes));
+            CUDA_CHECK(cudaMalloc(&ctx.d_offsets, row_bytes));
+            CUDA_CHECK(cudaStreamCreate(&ctx.stream));
+
+            cudaError_t err = computeIntervalIntersectionOffsets(
+                a->begin, a->end, a->offsets, a->row_count,
+                b->begin, b->end, b->offsets, b->row_count,
+                ctx.d_counts, ctx.d_offsets,
+                &ctx.total,
+                ctx.stream);
+            CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+            if (err != cudaSuccess) {
+                printf("computeIntervalIntersectionOffsets (sequence workspace 2D setup) failed: %s\n", cudaGetErrorString(err));
+            }
+            if (ctx.total > 0) {
+                ctx.buffers = allocResults(ctx.total);
+            }
+        }
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t idx = 0; idx < pairs.size(); ++idx) {
+            const SurfaceDevice* a = pairs[idx].first;
+            const SurfaceDevice* b = pairs[idx].second;
+            Context& ctx = contexts[idx];
+            if (!a || !b || ctx.row_count == 0) {
+                continue;
+            }
+
+            cudaError_t err = computeIntervalIntersectionOffsets(
+                a->begin, a->end, a->offsets, a->row_count,
+                b->begin, b->end, b->offsets, b->row_count,
+                ctx.d_counts, ctx.d_offsets,
+                nullptr,
+                ctx.stream);
+            if (err != cudaSuccess) {
+                printf("computeIntervalIntersectionOffsets (sequence workspace 2D) failed: %s\n", cudaGetErrorString(err));
+            }
+
+            if (ctx.total > 0) {
+                err = writeIntervalIntersectionsWithOffsets(
+                    a->begin, a->end, a->offsets, a->row_count,
+                    b->begin, b->end, b->offsets, b->row_count,
+                    ctx.d_offsets,
+                    ctx.buffers.y_idx,
+                    ctx.buffers.begin,
+                    ctx.buffers.end,
+                    ctx.buffers.a_idx,
+                    ctx.buffers.b_idx,
+                    ctx.stream);
+                if (err != cudaSuccess) {
+                    printf("writeIntervalIntersectionsWithOffsets (sequence workspace 2D) failed: %s\n", cudaGetErrorString(err));
+                }
+            }
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    for (Context& ctx : contexts) {
+        if (ctx.stream) CUDA_CHECK(cudaStreamDestroy(ctx.stream));
+        if (ctx.d_counts) CUDA_CHECK(cudaFree(ctx.d_counts));
+        if (ctx.d_offsets) CUDA_CHECK(cudaFree(ctx.d_offsets));
+        freeResults(ctx.buffers);
+    }
+
+    return ms / iterations;
+}
+
+float benchmarkGraph2DSequence(
+    const std::vector<std::pair<const SurfaceDevice*, const SurfaceDevice*>>& pairs,
+    int iterations) {
+    if (pairs.empty()) {
+        return 0.0f;
+    }
+
+    struct Context {
+        IntervalIntersectionGraph offsets_graph{};
+        IntervalIntersectionGraph write_graph{};
+        int* d_counts = nullptr;
+        int* d_offsets = nullptr;
+        void* d_temp_storage = nullptr;
+        size_t temp_bytes = 0;
+        int* d_total = nullptr;
+        ResultBuffers buffers{};
+        cudaStream_t stream = nullptr;
+        int total_capacity = 0;
+        int row_count = 0;
+    };
+
+    std::vector<Context> contexts(pairs.size());
+
+    for (size_t idx = 0; idx < pairs.size(); ++idx) {
+        const SurfaceDevice* a = pairs[idx].first;
+        const SurfaceDevice* b = pairs[idx].second;
+        Context& ctx = contexts[idx];
+        if (!a || !b) {
+            continue;
+        }
+
+        ctx.row_count = a->row_count;
+        if (ctx.row_count == 0) {
+            continue;
+        }
+
+        const size_t row_bytes = static_cast<size_t>(ctx.row_count) * sizeof(int);
+        CUDA_CHECK(cudaMalloc(&ctx.d_counts, row_bytes));
+        CUDA_CHECK(cudaMalloc(&ctx.d_offsets, row_bytes));
+        CUDA_CHECK(cudaStreamCreate(&ctx.stream));
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(nullptr,
+                                                 ctx.temp_bytes,
+                                                 ctx.d_counts,
+                                                 ctx.d_offsets,
+                                                 ctx.row_count));
+        if (ctx.temp_bytes > 0) {
+            CUDA_CHECK(cudaMalloc(&ctx.d_temp_storage, ctx.temp_bytes));
+        }
+        CUDA_CHECK(cudaMalloc(&ctx.d_total, sizeof(int)));
+
+        IntervalIntersectionOffsetsGraphConfig offsets_cfg{};
+        offsets_cfg.d_a_begin = a->begin;
+        offsets_cfg.d_a_end = a->end;
+        offsets_cfg.d_a_y_offsets = a->offsets;
+        offsets_cfg.a_y_count = a->row_count;
+        offsets_cfg.d_b_begin = b->begin;
+        offsets_cfg.d_b_end = b->end;
+        offsets_cfg.d_b_y_offsets = b->offsets;
+        offsets_cfg.b_y_count = b->row_count;
+        offsets_cfg.d_counts = ctx.d_counts;
+        offsets_cfg.d_offsets = ctx.d_offsets;
+        offsets_cfg.d_scan_temp_storage = ctx.d_temp_storage;
+        offsets_cfg.scan_temp_storage_bytes = ctx.temp_bytes;
+        offsets_cfg.d_total = ctx.d_total;
+
+        cudaError_t err = createIntervalIntersectionOffsetsGraph(&ctx.offsets_graph, offsets_cfg, ctx.stream);
+        if (err != cudaSuccess) {
+            printf("createIntervalIntersectionOffsetsGraph (sequence 2D) failed: %s\n", cudaGetErrorString(err));
+            continue;
+        }
+
+        err = launchIntervalIntersectionGraph(ctx.offsets_graph, ctx.stream);
+        if (err != cudaSuccess) {
+            printf("launchIntervalIntersectionGraph (offsets sequence 2D setup) failed: %s\n", cudaGetErrorString(err));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+
+        int total = 0;
+        CUDA_CHECK(cudaMemcpy(&total, ctx.d_total, sizeof(int), cudaMemcpyDeviceToHost));
+        ctx.total_capacity = total;
+        if (ctx.total_capacity > 0) {
+            ctx.buffers = allocResults(ctx.total_capacity);
+        }
+
+        IntervalIntersectionWriteGraphConfig write_cfg{};
+        write_cfg.d_a_begin = a->begin;
+        write_cfg.d_a_end = a->end;
+        write_cfg.d_a_y_offsets = a->offsets;
+        write_cfg.a_y_count = a->row_count;
+        write_cfg.d_b_begin = b->begin;
+        write_cfg.d_b_end = b->end;
+        write_cfg.d_b_y_offsets = b->offsets;
+        write_cfg.b_y_count = b->row_count;
+        write_cfg.d_offsets = ctx.d_offsets;
+        write_cfg.d_r_y_idx = ctx.buffers.y_idx;
+        write_cfg.d_r_begin = ctx.buffers.begin;
+        write_cfg.d_r_end = ctx.buffers.end;
+        write_cfg.d_a_idx = ctx.buffers.a_idx;
+        write_cfg.d_b_idx = ctx.buffers.b_idx;
+        write_cfg.total_capacity = ctx.total_capacity;
+
+        err = createIntervalIntersectionWriteGraph(&ctx.write_graph, write_cfg, ctx.stream);
+        if (err != cudaSuccess) {
+            printf("createIntervalIntersectionWriteGraph (sequence 2D) failed: %s\n", cudaGetErrorString(err));
+            continue;
+        }
+
+        if (ctx.total_capacity > 0) {
+            err = launchIntervalIntersectionGraph(ctx.write_graph, ctx.stream);
+            if (err != cudaSuccess) {
+                printf("launchIntervalIntersectionGraph (write warm-up sequence 2D) failed: %s\n", cudaGetErrorString(err));
+            }
+            CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+        }
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (Context& ctx : contexts) {
+            if (!ctx.stream || ctx.row_count == 0) {
+                continue;
+            }
+            cudaError_t err = launchIntervalIntersectionGraph(ctx.offsets_graph, ctx.stream);
+            if (err != cudaSuccess) {
+                printf("launchIntervalIntersectionGraph (offsets sequence 2D) failed: %s\n", cudaGetErrorString(err));
+            }
+            if (ctx.total_capacity > 0) {
+                err = launchIntervalIntersectionGraph(ctx.write_graph, ctx.stream);
+                if (err != cudaSuccess) {
+                    printf("launchIntervalIntersectionGraph (write sequence 2D) failed: %s\n", cudaGetErrorString(err));
+                }
+            }
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    for (Context& ctx : contexts) {
+        destroyIntervalIntersectionGraph(&ctx.write_graph);
+        destroyIntervalIntersectionGraph(&ctx.offsets_graph);
+        if (ctx.stream) CUDA_CHECK(cudaStreamDestroy(ctx.stream));
+        if (ctx.d_counts) CUDA_CHECK(cudaFree(ctx.d_counts));
+        if (ctx.d_offsets) CUDA_CHECK(cudaFree(ctx.d_offsets));
+        if (ctx.d_temp_storage) CUDA_CHECK(cudaFree(ctx.d_temp_storage));
+        if (ctx.d_total) CUDA_CHECK(cudaFree(ctx.d_total));
+        freeResults(ctx.buffers);
+    }
+
+    return ms / iterations;
+}
+
 float benchmarkClassic3D(const VolumeDevice& a,
                          const VolumeDevice& b,
                          int iterations) {
@@ -856,6 +1178,340 @@ float benchmarkGraph3D(const VolumeDevice& a,
     return ms / iterations;
 }
 
+float benchmarkClassic3DSequence(
+    const std::vector<std::pair<const VolumeDevice*, const VolumeDevice*>>& pairs,
+    int iterations) {
+    if (pairs.empty()) {
+        return 0.0f;
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (const auto& pair : pairs) {
+            const VolumeDevice* a = pair.first;
+            const VolumeDevice* b = pair.second;
+            if (!a || !b) {
+                continue;
+            }
+
+            int* d_r_z_idx = nullptr;
+            int* d_r_y_idx = nullptr;
+            int* d_r_begin = nullptr;
+            int* d_r_end = nullptr;
+            int* d_a_idx = nullptr;
+            int* d_b_idx = nullptr;
+            int total = 0;
+
+            cudaError_t err = findVolumeIntersections(
+                a->begin, a->end, a->interval_count,
+                a->offsets, a->row_to_y, a->row_to_z, a->row_count,
+                b->begin, b->end, b->interval_count,
+                b->offsets, b->row_count,
+                &d_r_z_idx, &d_r_y_idx,
+                &d_r_begin, &d_r_end,
+                &d_a_idx, &d_b_idx,
+                &total);
+            if (err != cudaSuccess) {
+                printf("findVolumeIntersections (sequence 3D) failed: %s\n", cudaGetErrorString(err));
+            }
+            freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    return ms / iterations;
+}
+
+float benchmarkWorkspace3DSequence(
+    const std::vector<std::pair<const VolumeDevice*, const VolumeDevice*>>& pairs,
+    int iterations) {
+    if (pairs.empty()) {
+        return 0.0f;
+    }
+
+    struct Context {
+        int* d_counts = nullptr;
+        int* d_offsets = nullptr;
+        ResultBuffers buffers;
+        cudaStream_t stream = nullptr;
+        int total = 0;
+        int row_count = 0;
+    };
+
+    std::vector<Context> contexts(pairs.size());
+
+    for (size_t idx = 0; idx < pairs.size(); ++idx) {
+        const VolumeDevice* a = pairs[idx].first;
+        const VolumeDevice* b = pairs[idx].second;
+        Context& ctx = contexts[idx];
+        if (!a || !b) {
+            continue;
+        }
+
+        ctx.row_count = a->row_count;
+        if (ctx.row_count > 0) {
+            const size_t row_bytes = static_cast<size_t>(ctx.row_count) * sizeof(int);
+            CUDA_CHECK(cudaMalloc(&ctx.d_counts, row_bytes));
+            CUDA_CHECK(cudaMalloc(&ctx.d_offsets, row_bytes));
+            CUDA_CHECK(cudaStreamCreate(&ctx.stream));
+
+            cudaError_t err = computeVolumeIntersectionOffsets(
+                a->begin, a->end, a->offsets, a->row_count,
+                b->begin, b->end, b->offsets, b->row_count,
+                ctx.d_counts, ctx.d_offsets,
+                &ctx.total,
+                ctx.stream);
+            CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+            if (err != cudaSuccess) {
+                printf("computeVolumeIntersectionOffsets (sequence workspace 3D setup) failed: %s\n", cudaGetErrorString(err));
+            }
+            if (ctx.total > 0) {
+                ctx.buffers = allocResults(ctx.total);
+            }
+        }
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t idx = 0; idx < pairs.size(); ++idx) {
+            const VolumeDevice* a = pairs[idx].first;
+            const VolumeDevice* b = pairs[idx].second;
+            Context& ctx = contexts[idx];
+            if (!a || !b || ctx.row_count == 0) {
+                continue;
+            }
+
+            cudaError_t err = computeVolumeIntersectionOffsets(
+                a->begin, a->end, a->offsets, a->row_count,
+                b->begin, b->end, b->offsets, b->row_count,
+                ctx.d_counts, ctx.d_offsets,
+                nullptr,
+                ctx.stream);
+            if (err != cudaSuccess) {
+                printf("computeVolumeIntersectionOffsets (sequence workspace 3D) failed: %s\n", cudaGetErrorString(err));
+            }
+
+            if (ctx.total > 0) {
+                err = writeVolumeIntersectionsWithOffsets(
+                    a->begin, a->end, a->offsets, a->row_count,
+                    b->begin, b->end, b->offsets, b->row_count,
+                    a->row_to_y, a->row_to_z,
+                    ctx.d_offsets,
+                    ctx.buffers.z_idx,
+                    ctx.buffers.y_idx,
+                    ctx.buffers.begin,
+                    ctx.buffers.end,
+                    ctx.buffers.a_idx,
+                    ctx.buffers.b_idx,
+                    ctx.stream);
+                if (err != cudaSuccess) {
+                    printf("writeVolumeIntersectionsWithOffsets (sequence workspace 3D) failed: %s\n", cudaGetErrorString(err));
+                }
+            }
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    for (Context& ctx : contexts) {
+        if (ctx.stream) CUDA_CHECK(cudaStreamDestroy(ctx.stream));
+        if (ctx.d_counts) CUDA_CHECK(cudaFree(ctx.d_counts));
+        if (ctx.d_offsets) CUDA_CHECK(cudaFree(ctx.d_offsets));
+        freeResults(ctx.buffers);
+    }
+
+    return ms / iterations;
+}
+
+float benchmarkGraph3DSequence(
+    const std::vector<std::pair<const VolumeDevice*, const VolumeDevice*>>& pairs,
+    int iterations) {
+    if (pairs.empty()) {
+        return 0.0f;
+    }
+
+    struct Context {
+        VolumeIntersectionGraph offsets_graph{};
+        VolumeIntersectionGraph write_graph{};
+        int* d_counts = nullptr;
+        int* d_offsets = nullptr;
+        void* d_temp_storage = nullptr;
+        size_t temp_bytes = 0;
+        int* d_total = nullptr;
+        ResultBuffers buffers{};
+        cudaStream_t stream = nullptr;
+        int total_capacity = 0;
+        int row_count = 0;
+        const int* d_row_to_y = nullptr;
+        const int* d_row_to_z = nullptr;
+    };
+
+    std::vector<Context> contexts(pairs.size());
+
+    for (size_t idx = 0; idx < pairs.size(); ++idx) {
+        const VolumeDevice* a = pairs[idx].first;
+        const VolumeDevice* b = pairs[idx].second;
+        Context& ctx = contexts[idx];
+        if (!a || !b) {
+            continue;
+        }
+
+        ctx.row_count = a->row_count;
+        ctx.d_row_to_y = a->row_to_y;
+        ctx.d_row_to_z = a->row_to_z;
+        if (ctx.row_count == 0) {
+            continue;
+        }
+
+        const size_t row_bytes = static_cast<size_t>(ctx.row_count) * sizeof(int);
+        CUDA_CHECK(cudaMalloc(&ctx.d_counts, row_bytes));
+        CUDA_CHECK(cudaMalloc(&ctx.d_offsets, row_bytes));
+        CUDA_CHECK(cudaStreamCreate(&ctx.stream));
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(nullptr,
+                                                 ctx.temp_bytes,
+                                                 ctx.d_counts,
+                                                 ctx.d_offsets,
+                                                 ctx.row_count));
+        if (ctx.temp_bytes > 0) {
+            CUDA_CHECK(cudaMalloc(&ctx.d_temp_storage, ctx.temp_bytes));
+        }
+        CUDA_CHECK(cudaMalloc(&ctx.d_total, sizeof(int)));
+
+        VolumeIntersectionOffsetsGraphConfig offsets_cfg{};
+        offsets_cfg.d_a_begin = a->begin;
+        offsets_cfg.d_a_end = a->end;
+        offsets_cfg.d_a_row_offsets = a->offsets;
+        offsets_cfg.a_row_count = a->row_count;
+        offsets_cfg.d_b_begin = b->begin;
+        offsets_cfg.d_b_end = b->end;
+        offsets_cfg.d_b_row_offsets = b->offsets;
+        offsets_cfg.b_row_count = b->row_count;
+        offsets_cfg.d_counts = ctx.d_counts;
+        offsets_cfg.d_offsets = ctx.d_offsets;
+        offsets_cfg.d_scan_temp_storage = ctx.d_temp_storage;
+        offsets_cfg.scan_temp_storage_bytes = ctx.temp_bytes;
+        offsets_cfg.d_total = ctx.d_total;
+
+        cudaError_t err = createVolumeIntersectionOffsetsGraph(&ctx.offsets_graph, offsets_cfg, ctx.stream);
+        if (err != cudaSuccess) {
+            printf("createVolumeIntersectionOffsetsGraph (sequence 3D) failed: %s\n", cudaGetErrorString(err));
+            continue;
+        }
+
+        err = launchVolumeIntersectionGraph(ctx.offsets_graph, ctx.stream);
+        if (err != cudaSuccess) {
+            printf("launchVolumeIntersectionGraph (offsets sequence 3D setup) failed: %s\n", cudaGetErrorString(err));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+
+        int total = 0;
+        CUDA_CHECK(cudaMemcpy(&total, ctx.d_total, sizeof(int), cudaMemcpyDeviceToHost));
+        ctx.total_capacity = total;
+        if (ctx.total_capacity > 0) {
+            ctx.buffers = allocResults(ctx.total_capacity);
+        }
+
+        VolumeIntersectionWriteGraphConfig write_cfg{};
+        write_cfg.d_a_begin = a->begin;
+        write_cfg.d_a_end = a->end;
+        write_cfg.d_a_row_offsets = a->offsets;
+        write_cfg.a_row_count = a->row_count;
+        write_cfg.d_a_row_to_y = a->row_to_y;
+        write_cfg.d_a_row_to_z = a->row_to_z;
+        write_cfg.d_b_begin = b->begin;
+        write_cfg.d_b_end = b->end;
+        write_cfg.d_b_row_offsets = b->offsets;
+        write_cfg.b_row_count = b->row_count;
+        write_cfg.d_offsets = ctx.d_offsets;
+        write_cfg.d_r_z_idx = ctx.buffers.z_idx;
+        write_cfg.d_r_y_idx = ctx.buffers.y_idx;
+        write_cfg.d_r_begin = ctx.buffers.begin;
+        write_cfg.d_r_end = ctx.buffers.end;
+        write_cfg.d_a_idx = ctx.buffers.a_idx;
+        write_cfg.d_b_idx = ctx.buffers.b_idx;
+        write_cfg.total_capacity = ctx.total_capacity;
+
+        err = createVolumeIntersectionWriteGraph(&ctx.write_graph, write_cfg, ctx.stream);
+        if (err != cudaSuccess) {
+            printf("createVolumeIntersectionWriteGraph (sequence 3D) failed: %s\n", cudaGetErrorString(err));
+            continue;
+        }
+
+        if (ctx.total_capacity > 0) {
+            err = launchVolumeIntersectionGraph(ctx.write_graph, ctx.stream);
+            if (err != cudaSuccess) {
+                printf("launchVolumeIntersectionGraph (write warm-up sequence 3D) failed: %s\n", cudaGetErrorString(err));
+            }
+            CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+        }
+    }
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (Context& ctx : contexts) {
+            if (!ctx.stream || ctx.row_count == 0) {
+                continue;
+            }
+            cudaError_t err = launchVolumeIntersectionGraph(ctx.offsets_graph, ctx.stream);
+            if (err != cudaSuccess) {
+                printf("launchVolumeIntersectionGraph (offsets sequence 3D) failed: %s\n", cudaGetErrorString(err));
+            }
+            if (ctx.total_capacity > 0) {
+                err = launchVolumeIntersectionGraph(ctx.write_graph, ctx.stream);
+                if (err != cudaSuccess) {
+                    printf("launchVolumeIntersectionGraph (write sequence 3D) failed: %s\n", cudaGetErrorString(err));
+                }
+            }
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    for (Context& ctx : contexts) {
+        destroyVolumeIntersectionGraph(&ctx.write_graph);
+        destroyVolumeIntersectionGraph(&ctx.offsets_graph);
+        if (ctx.stream) CUDA_CHECK(cudaStreamDestroy(ctx.stream));
+        if (ctx.d_counts) CUDA_CHECK(cudaFree(ctx.d_counts));
+        if (ctx.d_offsets) CUDA_CHECK(cudaFree(ctx.d_offsets));
+        if (ctx.d_temp_storage) CUDA_CHECK(cudaFree(ctx.d_temp_storage));
+        if (ctx.d_total) CUDA_CHECK(cudaFree(ctx.d_total));
+        freeResults(ctx.buffers);
+    }
+
+    return ms / iterations;
+}
+
 } // namespace
 
 int main() {
@@ -871,18 +1527,39 @@ int main() {
 
     SurfaceDevice rect = makeDenseSurface(rows2D, intervalsPerRow2D);
     SurfaceDevice circ = makeDenseSurface(rows2D, intervalsPerRow2D);
+    SurfaceDevice rectMedium = makeDenseSurface(rows2D, intervalsPerRow2D / 4, 8);
+    SurfaceDevice circMedium = makeDenseSurface(rows2D, intervalsPerRow2D / 4, 8);
+    SurfaceDevice rectSparse = makeDenseSurface(rows2D, intervalsPerRow2D / 16, 16);
+    SurfaceDevice circSparse = makeDenseSurface(rows2D, intervalsPerRow2D / 16, 16);
 
     VolumeDevice box = makeDenseVolume(rows3DZ, rows3DY, intervalsPerRow3D);
     VolumeDevice sph = makeDenseVolume(rows3DZ, rows3DY, intervalsPerRow3D);
+    VolumeDevice boxMedium = makeDenseVolume(rows3DZ, rows3DY, intervalsPerRow3D / 2, 8);
+    VolumeDevice sphMedium = makeDenseVolume(rows3DZ, rows3DY, intervalsPerRow3D / 2, 8);
     VolumeDevice boxSmall = makeDenseVolume(smallRows3DZ, smallRows3DY, smallIntervalsPerRow3D);
     VolumeDevice sphSmall = makeDenseVolume(smallRows3DZ, smallRows3DY, smallIntervalsPerRow3D);
 
     int stream_count = 4;
 
+    std::vector<std::pair<const SurfaceDevice*, const SurfaceDevice*>> surface_pairs = {
+        {&rect, &circ},
+        {&rectMedium, &circMedium},
+        {&rectSparse, &circSparse}
+    };
+
+    std::vector<std::pair<const VolumeDevice*, const VolumeDevice*>> volume_pairs = {
+        {&box, &sph},
+        {&boxMedium, &sphMedium},
+        {&boxSmall, &sphSmall}
+    };
+
     float classic2D = benchmarkClassic2D(rect, circ, iterations);
     float workspace2D = benchmarkWorkspaceStream2D(rect, circ, iterations);
     float multiStream2D = benchmarkWorkspaceMultiStream2D(rect, circ, iterations, stream_count);
     float graph2D = benchmarkGraph2D(rect, circ, iterations);
+    float classic2DSeq = benchmarkClassic2DSequence(surface_pairs, iterations);
+    float workspace2DSeq = benchmarkWorkspace2DSequence(surface_pairs, iterations);
+    float graph2DSeq = benchmarkGraph2DSequence(surface_pairs, iterations);
 
     float classic3D = benchmarkClassic3D(box, sph, iterations);
     float workspace3D = benchmarkWorkspaceStream3D(box, sph, iterations);
@@ -893,12 +1570,18 @@ int main() {
     float workspace3DSmall = benchmarkWorkspaceStream3D(boxSmall, sphSmall, iterations);
     float multiStream3DSmall = benchmarkWorkspaceMultiStream3D(boxSmall, sphSmall, iterations, stream_count);
     float graph3DSmall = benchmarkGraph3D(boxSmall, sphSmall, iterations);
+    float classic3DSeq = benchmarkClassic3DSequence(volume_pairs, iterations);
+    float workspace3DSeq = benchmarkWorkspace3DSequence(volume_pairs, iterations);
+    float graph3DSeq = benchmarkGraph3DSequence(volume_pairs, iterations);
 
     printf("Benchmark (%d iterations)\n", iterations);
     printf("2D classic:   %.3f ms/iter\n", classic2D);
     printf("2D workspace: %.3f ms/iter\n", workspace2D);
     printf("2D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream2D);
     printf("2D graph:     %.3f ms/iter\n", graph2D);
+    printf("2D seq classic (3 pairs):   %.3f ms/iter\n", classic2DSeq);
+    printf("2D seq workspace (3 pairs): %.3f ms/iter\n", workspace2DSeq);
+    printf("2D seq graph (3 pairs):     %.3f ms/iter\n", graph2DSeq);
     printf("3D classic:   %.3f ms/iter\n", classic3D);
     printf("3D workspace: %.3f ms/iter\n", workspace3D);
     printf("3D workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3D);
@@ -907,11 +1590,20 @@ int main() {
     printf("3D SMALL workspace: %.3f ms/iter\n", workspace3DSmall);
     printf("3D SMALL workspace %d streams: %.3f ms/iter\n", stream_count, multiStream3DSmall);
     printf("3D SMALL graph:     %.3f ms/iter\n", graph3DSmall);
+    printf("3D seq classic (3 pairs):   %.3f ms/iter\n", classic3DSeq);
+    printf("3D seq workspace (3 pairs): %.3f ms/iter\n", workspace3DSeq);
+    printf("3D seq graph (3 pairs):     %.3f ms/iter\n", graph3DSeq);
 
     freeSurface(rect);
     freeSurface(circ);
+    freeSurface(rectMedium);
+    freeSurface(circMedium);
+    freeSurface(rectSparse);
+    freeSurface(circSparse);
     freeVolume(box);
     freeVolume(sph);
+    freeVolume(boxMedium);
+    freeVolume(sphMedium);
     freeVolume(boxSmall);
     freeVolume(sphSmall);
     return 0;
