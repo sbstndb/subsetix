@@ -29,8 +29,8 @@ cudaError_t findVolumeIntersections(
     const int* d_a_end,
     int a_interval_count,
     const int* d_a_row_offsets,
-    const int* d_a_row_to_y,
-    const int* d_a_row_to_z,
+    const int* d_a_row_to_y, // may be nullptr -> defaults to row index
+    const int* d_a_row_to_z, // may be nullptr -> defaults to 0
     int a_row_count,
     // Inputs for set B
     const int* d_b_begin,

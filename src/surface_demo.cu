@@ -81,9 +81,11 @@ SurfaceIntervals surfaceFromIntersections(const std::vector<int>& y_idx,
 }
 
 int main() {
-    constexpr int height = 1024;
-    constexpr int width = 1024;
     constexpr int intervals_per_row = 1024;
+    constexpr int width = intervals_per_row * 4;
+    constexpr int height = 1024;
+    constexpr bool RUN_HOST_UNION = false;
+    constexpr bool WRITE_VTK = false;
     constexpr int total_intervals = height * intervals_per_row;
 
     try {
@@ -106,20 +108,26 @@ int main() {
             circle.y_offsets[y] = y * intervals_per_row;
             for (int i = 0; i < intervals_per_row; ++i) {
                 int idx = y * intervals_per_row + i;
-                int base = y * 1000000;
-                rectangle.x_begin[idx] = base + 4 * i;
-                rectangle.x_end[idx] = base + 4 * i + 2;
-                circle.x_begin[idx] = base + 4 * i + 1;
-                circle.x_end[idx] = base + 4 * i + 3;
+                int base = 4 * i;
+                rectangle.x_begin[idx] = base;
+                rectangle.x_end[idx] = base + 2;
+                circle.x_begin[idx] = base + 1;
+                circle.x_end[idx] = base + 3;
             }
         }
         rectangle.y_offsets[height] = total_intervals;
         circle.y_offsets[height] = total_intervals;
 
-        auto union_start = std::chrono::high_resolution_clock::now();
-        SurfaceIntervals surface_union = unionSurfaces(rectangle, circle);
-        auto union_end = std::chrono::high_resolution_clock::now();
-        double union_ms = std::chrono::duration<double, std::milli>(union_end - union_start).count();
+        [[maybe_unused]] SurfaceIntervals surface_union;
+        [[maybe_unused]] double union_ms = 0.0;
+        [[maybe_unused]] bool have_union = false;
+        if (RUN_HOST_UNION || WRITE_VTK) {
+            auto union_start = std::chrono::high_resolution_clock::now();
+            surface_union = unionSurfaces(rectangle, circle);
+            auto union_end = std::chrono::high_resolution_clock::now();
+            union_ms = std::chrono::duration<double, std::milli>(union_end - union_start).count();
+            have_union = true;
+        }
 
         DeviceSurface d_rect = copyToDevice(rectangle);
         DeviceSurface d_circle = copyToDevice(circle);
@@ -166,40 +174,44 @@ int main() {
                                      ? total_ns / static_cast<double>(total_intersections)
                                      : 0.0;
 
-        std::cout << "Union time (host): " << union_ms << " ms\n";
+        if (RUN_HOST_UNION && have_union) {
+            std::cout << "Union time (host): " << union_ms << " ms\n";
+        }
         std::cout << "Intersection time (device): " << milliseconds << " ms"
                   << " (" << total_ns << " ns total, "
                   << per_interval_ns << " ns/interval)\n";
 
-        std::vector<int> h_r_y_idx(total_intersections);
-        std::vector<int> h_r_begin(total_intersections);
-        std::vector<int> h_r_end(total_intersections);
+        if (WRITE_VTK) {
+            std::vector<int> h_r_y_idx(total_intersections);
+            std::vector<int> h_r_begin(total_intersections);
+            std::vector<int> h_r_end(total_intersections);
 
-        if (total_intersections > 0) {
-            const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-            CUDA_CHECK(cudaMemcpy(h_r_y_idx.data(), d_r_y_idx, results_bytes, cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_r_begin.data(), d_r_begin, results_bytes, cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_r_end.data(), d_r_end, results_bytes, cudaMemcpyDeviceToHost));
+            if (total_intersections > 0) {
+                const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
+                CUDA_CHECK(cudaMemcpy(h_r_y_idx.data(), d_r_y_idx, results_bytes, cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_r_begin.data(), d_r_begin, results_bytes, cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_r_end.data(), d_r_end, results_bytes, cudaMemcpyDeviceToHost));
+            }
+
+            SurfaceIntervals surface_intersection = surfaceFromIntersections(
+                h_r_y_idx, h_r_begin, h_r_end, width, height);
+
+            auto rect_mask = rasterizeToMask(rectangle);
+            auto circle_mask = rasterizeToMask(circle);
+            auto union_mask = rasterizeToMask(surface_union);
+            auto intersection_mask = rasterizeToMask(surface_intersection);
+
+            writeStructuredPoints("surface_rectangle.vtk", width, height, rect_mask);
+            writeStructuredPoints("surface_circle.vtk", width, height, circle_mask);
+            writeStructuredPoints("surface_union.vtk", width, height, union_mask);
+            writeStructuredPoints("surface_intersection.vtk", width, height, intersection_mask);
+
+            std::cout << "Generated 2D VTK surfaces:\n";
+            std::cout << "  surface_rectangle.vtk\n";
+            std::cout << "  surface_circle.vtk\n";
+            std::cout << "  surface_union.vtk\n";
+            std::cout << "  surface_intersection.vtk\n";
         }
-
-        SurfaceIntervals surface_intersection = surfaceFromIntersections(
-            h_r_y_idx, h_r_begin, h_r_end, width, height);
-
-        auto rect_mask = rasterizeToMask(rectangle);
-        auto circle_mask = rasterizeToMask(circle);
-        auto union_mask = rasterizeToMask(surface_union);
-        auto intersection_mask = rasterizeToMask(surface_intersection);
-
-        writeStructuredPoints("surface_rectangle.vtk", width, height, rect_mask);
-        writeStructuredPoints("surface_circle.vtk", width, height, circle_mask);
-        writeStructuredPoints("surface_union.vtk", width, height, union_mask);
-        writeStructuredPoints("surface_intersection.vtk", width, height, intersection_mask);
-
-        std::cout << "Generated 2D VTK surfaces:\n";
-        std::cout << "  surface_rectangle.vtk\n";
-        std::cout << "  surface_circle.vtk\n";
-        std::cout << "  surface_union.vtk\n";
-        std::cout << "  surface_intersection.vtk\n";
 
         freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
         freeDeviceSurface(d_rect);
