@@ -138,6 +138,21 @@ class InterLevelOpsTest(unittest.TestCase):
             np.array([4.0, 8.0], dtype=np.float32),
         )
 
+    def test_restrict_field_mean_promotes_integer_dtype(self) -> None:
+        coarse_set = build_interval_set(row_offsets=[0, 1], begin=[0], end=[2])
+        coarse_field = create_interval_field(coarse_set, fill_value=0, dtype=self.cp.int32)
+        fine_field = prolong_field(coarse_field, ratio=2)
+        pattern = self.cp.asarray([0, 1, 0, 1], dtype=self.cp.int32)
+        repeats = max(1, (fine_field.values.size + pattern.size - 1) // pattern.size)
+        tiled = self.cp.tile(pattern, repeats)[: fine_field.values.size]
+        fine_field.values[:] = tiled
+        restricted = restrict_field(fine_field, ratio=2, reducer="mean")
+        self.assertTrue(np.issubdtype(restricted.values.dtype, np.floating))
+        np.testing.assert_allclose(
+            self.cp.asnumpy(restricted.values),
+            np.array([0.5, 0.5], dtype=np.float32),
+        )
+
     def test_covered_by_fine_missing_level(self) -> None:
         ml = MultiLevel2D.create(2, base_ratio=2)
         level0 = build_interval_set(

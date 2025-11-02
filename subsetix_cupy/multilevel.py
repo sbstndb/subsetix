@@ -329,7 +329,12 @@ def restrict_field(field: IntervalField, ratio: int, *, reducer: str = "mean") -
     cp = _require_cupy()
     fine_set = field.interval_set
     coarse_set = restrict_set(fine_set, ratio)
-    coarse_field = create_interval_field(coarse_set, fill_value=0.0, dtype=field.values.dtype)
+    base_dtype = cp.dtype(field.values.dtype)
+    if reducer == "mean":
+        target_dtype = cp.dtype(cp.result_type(base_dtype, cp.float32))
+    else:
+        target_dtype = base_dtype
+    coarse_field = create_interval_field(coarse_set, fill_value=0.0, dtype=target_dtype)
     if field.values.size == 0 or coarse_field.values.size == 0:
         return coarse_field
 
@@ -383,7 +388,7 @@ def restrict_field(field: IntervalField, ratio: int, *, reducer: str = "mean") -
                 reduced = cp.max(stack, axis=(0, 2))
             else:
                 raise ValueError(f"unsupported reducer '{reducer}'")
-            coarse_field.values[start_coarse:end_coarse] = reduced.astype(coarse_field.values.dtype, copy=False)
+            coarse_field.values[start_coarse:end_coarse] = reduced.astype(target_dtype, copy=False)
 
     return coarse_field
 

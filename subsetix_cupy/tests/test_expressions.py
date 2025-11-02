@@ -230,6 +230,12 @@ class IntervalFieldTest(unittest.TestCase):
         self.assertIsNone(get_cell(field, row=0, x=3))
         self.assertFalse(set_cell(field, row=1, x=0, value=3.0))
 
+    def test_empty_field_dtype_matches_fill(self) -> None:
+        empty_set = build_interval_set(row_offsets=[0, 0], begin=[], end=[])
+        value = self.cp.float64(3.0)
+        field = create_interval_field(empty_set, fill_value=value)
+        self.assertEqual(field.values.dtype, value.dtype)
+        self.assertEqual(field.values.size, 0)
 
 
 if __name__ == "__main__":

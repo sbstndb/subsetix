@@ -73,9 +73,12 @@ def create_interval_field(
     total_cells = int(cell_offsets[-1].astype(cp.int64).item())
 
     if dtype is None:
-        dtype = cp.asarray(fill_value).dtype if total_cells > 0 else cp.float32
+        inferred = cp.asarray(fill_value)
+        dtype = inferred.dtype
+    else:
+        dtype = cp.dtype(dtype)
 
-    values = cp.full((total_cells,), fill_value, dtype=dtype) if total_cells > 0 else cp.empty((0,), dtype=dtype)
+    values = cp.full((total_cells,), fill_value, dtype=dtype)
 
     return IntervalField(
         interval_set=interval_set,
