@@ -111,6 +111,14 @@ def _intervals_to_mask(interval_set: IntervalSet, width: int) -> Tuple[np.ndarra
     return mask, offsets
 
 
+def _clone_interval_set(interval_set: IntervalSet) -> IntervalSet:
+    return IntervalSet(
+        begin=cp.copy(interval_set.begin),
+        end=cp.copy(interval_set.end),
+        row_offsets=cp.copy(interval_set.row_offsets),
+    )
+
+
 def _plot_cell_sets(
     sets: Sequence[Tuple[IntervalSet, str, str]],
     width: int,
@@ -266,11 +274,11 @@ def main() -> None:
     rect_mask, rect_offsets = _intervals_to_mask(rect_set, width)
     circle_mask, circle_offsets = _intervals_to_mask(circle_set, width)
 
-    union_set = evaluate(make_union(rect_expr, circle_expr), workspace)
+    union_set = _clone_interval_set(evaluate(make_union(rect_expr, circle_expr), workspace))
     union_mask, union_offsets = _intervals_to_mask(union_set, width)
-    intersection_set = evaluate(make_intersection(rect_expr, circle_expr), workspace)
+    intersection_set = _clone_interval_set(evaluate(make_intersection(rect_expr, circle_expr), workspace))
     intersection_mask, intersection_offsets = _intervals_to_mask(intersection_set, width)
-    difference_set = evaluate(make_difference(rect_expr, circle_expr), workspace)
+    difference_set = _clone_interval_set(evaluate(make_difference(rect_expr, circle_expr), workspace))
     difference_mask, difference_offsets = _intervals_to_mask(difference_set, width)
 
     print("Resolution:", width, "x", height)
