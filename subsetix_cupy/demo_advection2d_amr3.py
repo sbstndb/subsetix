@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import time
 import math
 
@@ -25,6 +26,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from .plot_utils import make_cell_collection, setup_cell_axes
+from .export_vtk import save_amr3_step_vtr, write_pvd
 
 
 def _init_condition(W: int, H: int, kind: str = "sharp", amp: float = 1.0) -> cp.ndarray:
@@ -245,6 +247,9 @@ def main():
     ap.add_argument("--nest-mid", type=int, default=2, help="Required mid-level ring thickness (in L1 cells) around any L2 region")
     ap.add_argument("--ic", type=str, choices=["gauss", "sharp", "disk", "square", "edge"], default="sharp")
     ap.add_argument("--ic-amp", type=float, default=1.0)
+    ap.add_argument("--save-vtk", type=str, default=None, help="Output directory for VTK (.vtr/.pvd) export")
+    ap.add_argument("--save-every", type=int, default=0, help="Save every N steps (0=disable)")
+    ap.add_argument("--save-base", type=str, default="amr3", help="Base filename for VTK outputs")
     args = ap.parse_args()
 
     W = H = int(args.coarse)
@@ -344,6 +349,7 @@ def main():
     ev_s, ev_e = cp.cuda.Event(), cp.cuda.Event()
     total_gpu, total_wall = 0.0, 0.0
 
+    pvd_entries = []
     for step in range(int(args.steps)):
         # Interface halos and pad arrays before stencil
         # L0<->L1
@@ -399,6 +405,30 @@ def main():
         total_gpu += step_gpu; total_wall += step_wall
         if (step % 20) == 0 or step == int(args.steps) - 1:
             print(f"step {step:04d}: compute {step_gpu:.3f} ms GPU, {step_wall:.3f} ms wall")
+
+        # Optional VTK export
+        if args.save_vtk and args.save_every and ((step % int(args.save_every)) == 0 or step == int(args.steps) - 1):
+            rels, pvd_entry = save_amr3_step_vtr(
+                args.save_vtk,
+                args.save_base,
+                step,
+                time_value=float((step + 1) * dt),
+                u0=u0,
+                u1=u1,
+                u2=u2,
+                refine0=refine0,
+                L1_mask=L1_mask,
+                refine1_mid=refine1_mid,
+                L2_mask=L2_mask,
+                dx0=dx0,
+                dy0=dy0,
+                dx1=dx1,
+                dy1=dy1,
+                dx2=dx2,
+                dy2=dy2,
+            )
+            pvd_entries.append(pvd_entry)
+            write_pvd(os.path.join(args.save_vtk, f"{args.save_base}.pvd"), pvd_entries)
 
         # Regridding periodically (from level-specific gradients)
         if ((step + 1) % max(1, int(args.regrid_every))) == 0:
