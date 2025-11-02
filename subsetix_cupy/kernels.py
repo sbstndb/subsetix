@@ -357,3 +357,6 @@ _MERGE_WRITE_SRC = dedent(
     }
     """
 )
+
+
+# (no prolong_field kernels; prolongation is handled at higher level)

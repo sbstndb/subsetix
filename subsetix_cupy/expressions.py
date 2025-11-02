@@ -118,28 +118,49 @@ class IntervalSet:
     row_offsets: Any
 
     def __post_init__(self) -> None:
-        begin_np = _to_numpy(self.begin)
-        end_np = _to_numpy(self.end)
-        offsets_np = _to_numpy(self.row_offsets)
+        cp = _require_cupy()
+        # Dtype checks without copying whole arrays to host
+        if isinstance(self.begin, cp.ndarray):
+            if self.begin.dtype != cp.int32:
+                raise TypeError("begin must use int32 precision")
+        else:
+            if np.asarray(self.begin).dtype != np.int32:
+                raise TypeError("begin must use int32 precision")
+        if isinstance(self.end, cp.ndarray):
+            if self.end.dtype != cp.int32:
+                raise TypeError("end must use int32 precision")
+        else:
+            if np.asarray(self.end).dtype != np.int32:
+                raise TypeError("end must use int32 precision")
+        if isinstance(self.row_offsets, cp.ndarray):
+            if self.row_offsets.dtype != cp.int32:
+                raise TypeError("row_offsets must use int32 precision")
+        else:
+            if np.asarray(self.row_offsets).dtype != np.int32:
+                raise TypeError("row_offsets must use int32 precision")
 
-        if begin_np.dtype != np.int32:
-            raise TypeError("begin must use int32 precision")
-        if end_np.dtype != np.int32:
-            raise TypeError("end must use int32 precision")
-        if offsets_np.dtype != np.int32:
-            raise TypeError("row_offsets must use int32 precision")
-        if begin_np.shape != end_np.shape:
+        # Shape and consistency checks
+        if self.begin.shape != self.end.shape:
             raise ValueError("begin and end must share the same shape")
-        if offsets_np.ndim != 1:
-            raise ValueError("row_offsets must be one-dimensional")
-        if offsets_np[0] != 0:
+        # Ensure row_offsets is 1D
+        if hasattr(self.row_offsets, "ndim"):
+            if self.row_offsets.ndim != 1:
+                raise ValueError("row_offsets must be one-dimensional")
+        else:
+            if np.asarray(self.row_offsets).ndim != 1:
+                raise ValueError("row_offsets must be one-dimensional")
+        # Start at zero
+        first = int(self.row_offsets[0].item()) if isinstance(self.row_offsets, cp.ndarray) else int(np.asarray(self.row_offsets)[0])
+        if first != 0:
             raise ValueError("row_offsets must start at zero")
-        if offsets_np[-1] != begin_np.size:
+        # Last equals interval count
+        last = int(self.row_offsets[-1].item()) if isinstance(self.row_offsets, cp.ndarray) else int(np.asarray(self.row_offsets)[-1])
+        if last != self.begin.size:
             raise ValueError("row_offsets last entry must match interval count")
 
     @property
     def row_count(self) -> int:
-        return int(_to_numpy(self.row_offsets).size - 1)
+        return int(self.row_offsets.size - 1)
 
 
 class CuPyWorkspace:
@@ -313,8 +334,8 @@ def build_interval_set(
     offsets_arr = _ensure_int32(row_offsets)
     begin_arr = _ensure_int32(begin)
     end_arr = _ensure_int32(end)
-    offsets_np = _to_numpy(offsets_arr)
-    if offsets_np[-1] != len(begin_arr):
+    last = int(offsets_arr[-1].item())
+    if last != len(begin_arr):
         raise ValueError("row_offsets final entry must equal the interval count")
     return IntervalSet(
         begin=begin_arr,
@@ -329,10 +350,8 @@ def _apply_binary(
     mode: str,
     workspace: CuPyWorkspace | None = None,
 ) -> IntervalSet:
-    offsets_lhs = _to_numpy(lhs.row_offsets)
-    offsets_rhs = _to_numpy(rhs.row_offsets)
-
-    if offsets_lhs.shape != offsets_rhs.shape:
+    # Require identical row counts without copying to host
+    if lhs.row_offsets.size != rhs.row_offsets.size:
         raise ValueError(f"{mode} requires operands with identical row counts")
 
     cp = _require_cupy()
