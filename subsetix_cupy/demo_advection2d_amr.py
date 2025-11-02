@@ -27,6 +27,7 @@ import math
 import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 
 def _init_condition(W: int, H: int) -> cp.ndarray:
@@ -155,8 +156,8 @@ def main():
 
     # Plot setup
     if args.plot:
-        fig, axes = plt.subplots(1, 2, figsize=(11, 5.5))
-        ax0, ax1 = axes
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5.5))
+        ax0, ax1, ax2 = axes
         im0 = ax0.imshow(cp.asnumpy(u0), origin="lower", cmap="viridis", vmin=0.0, vmax=float(u0.max()))
         ax0.set_title("Coarse u (L0)")
         ax0.set_axis_off()
@@ -164,6 +165,12 @@ def main():
         im1 = ax1.imshow(cp.asnumpy(composite), origin="lower", cmap="viridis", vmin=0.0, vmax=float(composite.max()))
         ax1.set_title("Composite fine view (L1 ∪ prolong(L0\\L1))")
         ax1.set_axis_off()
+        # Level map: 0=coarse, 1=fine (on fine grid)
+        level_map = L1_mask.astype(cp.int8)
+        levels_cmap = mcolors.ListedColormap(["#bdbdbd", "#ff6961"])  # grey for coarse, red for fine
+        im2 = ax2.imshow(cp.asnumpy(level_map), origin="lower", cmap=levels_cmap, vmin=0, vmax=1)
+        ax2.set_title("Level map (0=coarse, 1=fine)")
+        ax2.set_axis_off()
         fig.tight_layout()
 
     # Timing accumulators
@@ -212,6 +219,9 @@ def main():
             im1.set_data(cp.asnumpy(composite))
             im0.set_clim(vmin=0.0, vmax=float(u0.max()))
             im1.set_clim(vmin=0.0, vmax=float(composite.max()))
+            # Update level map
+            level_map = L1_mask.astype(cp.int8)
+            im2.set_data(cp.asnumpy(level_map))
             plt.pause(max(0.001, args.interval / 1000.0))
 
     print(f"Avg per step: {total_gpu_ms/args.steps:.3f} ms GPU, {total_wall_ms/args.steps:.3f} ms wall")
@@ -219,4 +229,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
