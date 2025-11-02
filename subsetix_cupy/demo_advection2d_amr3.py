@@ -242,6 +242,7 @@ def main():
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--grading", type=str, choices=["vn","moore"], default="moore", help="Grading connectivity (vn=4, moore=8)")
+    ap.add_argument("--nest-mid", type=int, default=2, help="Required mid-level ring thickness (in L1 cells) around any L2 region")
     ap.add_argument("--ic", type=str, choices=["gauss", "sharp", "disk", "square", "edge"], default="sharp")
     ap.add_argument("--ic-amp", type=float, default=1.0)
     args = ap.parse_args()
@@ -266,9 +267,11 @@ def main():
     g0 = _grad_mag(u0)
     refine0 = _hysteresis_mask(g0, args.refine_frac, args.refine_frac * args.hysteresis, None)
     L1_mask_base = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
-    # Expand L1 by one mid-cell ring to ensure space for interface halos
+    # Expand L1 by k mid-cells ring to ensure space for interface halos
     _dilate = _dilate_mo if args.grading == 'moore' else _dilate_vn
-    L1_expanded = _dilate(L1_mask_base, wrap=(args.bc == 'wrap'))
+    L1_expanded = L1_mask_base
+    for _ in range(max(0, int(args.nest_mid))):
+        L1_expanded = _dilate(L1_expanded, wrap=(args.bc == 'wrap'))
     # Parent consistency: any expanded L1 mid cell forces its coarse parent to be L1
     coarse_force_from_L1ring = L1_expanded.reshape(H, R, W, R).any(axis=(1, 3))
     refine0 = refine0 | coarse_force_from_L1ring
@@ -276,9 +279,12 @@ def main():
     # L1 -> L2 (gated inside expanded L1)
     g1 = _grad_mag(u1)
     refine1_mid = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, None)
-    refine1_mid = refine1_mid & (
-        _erode_mo(L1_mask, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask, wrap=(args.bc == 'wrap'))
-    )
+    # Erode L1 by k mid-cells to enforce ring thickness
+    L1_for_gating = L1_mask
+    _erode = _erode_mo if args.grading == 'moore' else _erode_vn
+    for _ in range(max(0, int(args.nest_mid))):
+        L1_for_gating = _erode(L1_for_gating, wrap=(args.bc == 'wrap'))
+    refine1_mid = refine1_mid & L1_for_gating
     # Child-forces-parent: any L2 present forces its coarse parent to be L1 (keeps L1 around L2)
     coarse_force_from_L2 = refine1_mid.reshape(H, R, W, R).any(axis=(1, 3))
     refine0 = refine0 | coarse_force_from_L2
@@ -390,16 +396,20 @@ def main():
             g0 = _grad_mag(u0)
             refine0_new = _hysteresis_mask(g0, args.refine_frac, args.refine_frac * args.hysteresis, refine0)
             L1_mask_new_base = _prolong_repeat(refine0_new.astype(cp.uint8), R).astype(cp.bool_)
-            L1_ring_new = (_dilate_mo if args.grading=='moore' else _dilate_vn)(L1_mask_new_base, wrap=(args.bc=='wrap'))
+            # Expand by k mid cells
+            L1_ring_new = L1_mask_new_base
+            for _ in range(max(0, int(args.nest_mid))):
+                L1_ring_new = (_dilate_mo if args.grading=='moore' else _dilate_vn)(L1_ring_new, wrap=(args.bc=='wrap'))
             coarse_force_from_L1ring_new = L1_ring_new.reshape(H, R, W, R).any(axis=(1,3))
             refine0_new = refine0_new | coarse_force_from_L1ring_new
             L1_mask_new = _prolong_repeat(refine0_new.astype(cp.uint8), R).astype(cp.bool_)
             # L1 -> L2 (gated inside expanded L1)
             g1 = _grad_mag(u1)
             refine1_mid_new = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, refine1_mid)
-            refine1_mid_new = refine1_mid_new & (
-                _erode_mo(L1_mask_new, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask_new, wrap=(args.bc == 'wrap'))
-            )
+            L1_for_gating_new = L1_mask_new
+            for _ in range(max(0, int(args.nest_mid))):
+                L1_for_gating_new = (_erode_mo if args.grading=='moore' else _erode_vn)(L1_for_gating_new, wrap=(args.bc == 'wrap'))
+            refine1_mid_new = refine1_mid_new & L1_for_gating_new
             # Child-forces-parent: if any mid child in a coarse parent is refined to L2, keep that parent at L1
             coarse_force_l1_new = refine1_mid_new.reshape(H, R, W, R).any(axis=(1, 3))
             refine0_new = refine0_new | coarse_force_l1_new
