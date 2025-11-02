@@ -24,6 +24,7 @@ import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from .plot_utils import make_cell_collection, setup_cell_axes
 
 
 def _init_condition(W: int, H: int, kind: str = "sharp", amp: float = 1.0) -> cp.ndarray:
@@ -189,6 +190,44 @@ def _hysteresis_mask(g: cp.ndarray, frac_high: float, frac_low: float, prev: cp.
     return high | (prev & low)
 
 
+def _mask_to_interval_set(mask: cp.ndarray):
+    """Convert a 2D boolean/binary CuPy mask to an IntervalSet (GPU)."""
+    from .expressions import IntervalSet, _require_cupy
+
+    cp_mod = _require_cupy()
+    if mask.ndim != 2:
+        raise ValueError("mask must be 2D")
+    rows, width = mask.shape
+    if rows == 0 or width == 0:
+        zero = cp_mod.zeros(0, dtype=cp_mod.int32)
+        offsets = cp_mod.zeros(1, dtype=cp_mod.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+    m = (mask.astype(cp_mod.int8) > 0).astype(cp_mod.int8)
+    pad = cp_mod.pad(m, ((0, 0), (1, 1)), mode="constant")
+    diff = cp_mod.diff(pad, axis=1)
+    starts = diff == 1
+    stops = diff == -1
+    if int(starts.sum().item()) == 0:
+        zero = cp_mod.zeros(0, dtype=cp_mod.int32)
+        offsets = cp_mod.zeros(rows + 1, dtype=cp_mod.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+    start_rows, start_cols = cp_mod.where(starts)
+    stop_rows, stop_cols = cp_mod.where(stops)
+    start_counts = cp_mod.bincount(start_rows, minlength=rows)
+    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
+    row_offsets[0] = 0
+    if rows > 0:
+        cp_mod.cumsum(start_counts.astype(cp_mod.int32, copy=False), dtype=cp_mod.int32, out=row_offsets[1:])
+    # Sort by row-major key
+    key_beg = start_rows.astype(cp_mod.int64) * int(width) + start_cols.astype(cp_mod.int64)
+    order_b = cp_mod.argsort(key_beg)
+    begin = start_cols[order_b].astype(cp_mod.int32, copy=False)
+    key_end = stop_rows.astype(cp_mod.int64) * int(width) + stop_cols.astype(cp_mod.int64)
+    order_e = cp_mod.argsort(key_end)
+    end = stop_cols[order_e].astype(cp_mod.int32, copy=False)
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+
+
 def main():
     ap = argparse.ArgumentParser(description="2D linear advection with 3 AMR levels (CuPy)")
     ap.add_argument("--coarse", type=int, default=96)
@@ -248,13 +287,20 @@ def main():
         composite = cp.where(L2_mask, u2, cp.where(L1_f, u1_f, u0_f))
         im1 = ax1.imshow(cp.asnumpy(composite), origin="lower", cmap="viridis")
         ax1.set_title("Composite (fine)"); ax1.set_axis_off()
-        # Level map on fine grid: 0/1/2
-        level_map = cp.zeros_like(L2_mask, dtype=cp.int8)
-        level_map[L1_f] = 1
-        level_map[L2_mask] = 2
-        levels_cmap = mcolors.ListedColormap(["#bdbdbd", "#ffb347", "#ff6961"])  # 0 grey, 1 orange, 2 red
-        im2 = ax2.imshow(cp.asnumpy(level_map), origin="lower", cmap=levels_cmap, vmin=0, vmax=2)
-        ax2.set_title("Level map (0/1/2)"); ax2.set_axis_off()
+        # Level map with per-cell rectangles (coarse/mid/fine)
+        coarse_residual = (~refine0)
+        mid_residual = L1_mask & (~refine1_mid)
+        fine_active = L2_mask
+        c0_set = _mask_to_interval_set(coarse_residual)
+        c1_set = _mask_to_interval_set(mid_residual)
+        c2_set = _mask_to_interval_set(fine_active)
+        coll_c0 = make_cell_collection(c0_set, base_dim=W, target_ratio=R * R, facecolor="#bdbdbd")
+        coll_c1 = make_cell_collection(c1_set, base_dim=W, target_ratio=R * R, facecolor="#ffb347")
+        coll_c2 = make_cell_collection(c2_set, base_dim=W, target_ratio=R * R, facecolor="#ff6961")
+        ax2.add_collection(coll_c0)
+        ax2.add_collection(coll_c1)
+        ax2.add_collection(coll_c2)
+        setup_cell_axes(ax2, W, H, title="Level map (cells)")
         # Halos overlays on fine grid: 1/2 = L0-L1 halos, 3/4 = L1-L2 halos
         _dilate = _dilate_mo if args.grading == 'moore' else _dilate_vn
         coarse_if = _dilate(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
@@ -372,8 +418,19 @@ def main():
             u1_f = _prolong_repeat(u1, R); u0_f = _prolong_repeat(u0, R * R); L1_f = _prolong_repeat(L1_mask.astype(cp.uint8), R).astype(cp.bool_)
             composite = cp.where(L2_mask, u2, cp.where(L1_f, u1_f, u0_f))
             im1.set_data(cp.asnumpy(composite)); im1.set_clim(vmin=0.0, vmax=float(composite.max()))
-            level_map = cp.zeros_like(L2_mask, dtype=cp.int8); level_map[L1_f] = 1; level_map[L2_mask] = 2
-            im2.set_data(cp.asnumpy(level_map))
+            # Rebuild level map (cells)
+            for art in list(ax2.collections):
+                art.remove()
+            coarse_residual = (~refine0)
+            mid_residual = L1_mask & (~refine1_mid)
+            fine_active = L2_mask
+            c0_set = _mask_to_interval_set(coarse_residual)
+            c1_set = _mask_to_interval_set(mid_residual)
+            c2_set = _mask_to_interval_set(fine_active)
+            ax2.add_collection(make_cell_collection(c0_set, base_dim=W, target_ratio=R * R, facecolor="#bdbdbd"))
+            ax2.add_collection(make_cell_collection(c1_set, base_dim=W, target_ratio=R * R, facecolor="#ffb347"))
+            ax2.add_collection(make_cell_collection(c2_set, base_dim=W, target_ratio=R * R, facecolor="#ff6961"))
+            setup_cell_axes(ax2, W, H, title="Level map (cells)")
             coarse_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
             coarse_if_f = _prolong_repeat(coarse_if.astype(cp.uint8), R * R).astype(cp.bool_)
             fine1_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
