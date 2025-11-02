@@ -88,6 +88,28 @@ def _prolong_repeat(u_c: cp.ndarray, R: int) -> cp.ndarray:
     return cp.repeat(cp.repeat(u_c, R, axis=0), R, axis=1)
 
 
+def _dilate_von_neumann(mask: cp.ndarray, wrap: bool = False) -> cp.ndarray:
+    """Dilate boolean mask by 1 using N,S,E,W neighbors.
+    If wrap=True, use periodic wrap; otherwise clamp at boundaries.
+    """
+    if wrap:
+        up = cp.roll(mask, -1, axis=0)
+        down = cp.roll(mask, 1, axis=0)
+        left = cp.roll(mask, 1, axis=1)
+        right = cp.roll(mask, -1, axis=1)
+    else:
+        H, W = mask.shape
+        up = cp.zeros_like(mask)
+        up[1:, :] = mask[:-1, :]
+        down = cp.zeros_like(mask)
+        down[:-1, :] = mask[1:, :]
+        left = cp.zeros_like(mask)
+        left[:, 1:] = mask[:, :-1]
+        right = cp.zeros_like(mask)
+        right[:, :-1] = mask[:, 1:]
+    return mask | up | down | left | right
+
+
 def _percentile_mask(arr: cp.ndarray, frac_top: float) -> cp.ndarray:
     frac_top = max(0.0, min(1.0, float(frac_top)))
     if frac_top <= 0.0:
@@ -230,8 +252,8 @@ def main():
 
     # Plot setup
     if args.plot:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5.5))
-        ax0, ax1, ax2 = axes
+        fig, axes = plt.subplots(1, 4, figsize=(18, 5.5))
+        ax0, ax1, ax2, ax3 = axes
         im0 = ax0.imshow(cp.asnumpy(u0), origin="lower", cmap="viridis", vmin=0.0, vmax=float(u0.max()))
         ax0.set_title("Coarse u (L0)")
         ax0.set_axis_off()
@@ -245,6 +267,17 @@ def main():
         im2 = ax2.imshow(cp.asnumpy(level_map), origin="lower", cmap=levels_cmap, vmin=0, vmax=1)
         ax2.set_title("Level map (0=coarse, 1=fine)")
         ax2.set_axis_off()
+        # Halos overlay on fine grid: 1=coarse halo, 2=fine halo
+        coarse_if = _dilate_von_neumann(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
+        coarse_if_fine = _prolong_repeat(coarse_if.astype(cp.uint8), R).astype(cp.bool_)
+        fine_if = _dilate_von_neumann(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
+        halo_overlay = cp.zeros_like(L1_mask, dtype=cp.int8)
+        halo_overlay[coarse_if_fine] = 1
+        halo_overlay[fine_if] = 2
+        halo_cmap = mcolors.ListedColormap([(0,0,0,0), "#7fa2ff", "#c18aff"])  # transparent, blue, purple
+        im3 = ax3.imshow(cp.asnumpy(halo_overlay), origin="lower", cmap=halo_cmap, vmin=0, vmax=2)
+        ax3.set_title("Interface halos (coarse=blue, fine=purple)")
+        ax3.set_axis_off()
         fig.tight_layout()
 
     # Timing accumulators
@@ -253,13 +286,21 @@ def main():
     total_wall_ms = 0.0
 
     for step in range(int(args.steps)):
-        # Coupling at interfaces via values copy (ghost-like handling)
+        # Explicit interface halos and values
         u1_restr = _restrict_mean(u1, R)
+        # Coarse interface halo: neighbors of refine0 but not refined
+        coarse_if = _dilate_von_neumann(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
         u0_pad = u0.copy()
+        # fill coarse interior of refined region and interface halo from fine restriction
         u0_pad[refine0] = u1_restr[refine0]
+        u0_pad[coarse_if] = u1_restr[coarse_if]
+        # Fine: outside L1 replaced by coarse prolongation; interface halo is subset of that
         u0_prol = _prolong_repeat(u0, R)
         u1_pad = u1.copy()
         u1_pad[~L1_mask] = u0_prol[~L1_mask]
+        # Also ensure the immediate fine halo ring is consistent (redundant but explicit)
+        fine_if = _dilate_von_neumann(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
+        u1_pad[fine_if] = u0_prol[fine_if]
 
         ev_start.record(); wall0 = time.perf_counter()
         # Advance both levels with same dt (stable wrt fine spacing)
@@ -298,6 +339,14 @@ def main():
             # Update level map
             level_map = L1_mask.astype(cp.int8)
             im2.set_data(cp.asnumpy(level_map))
+            # Update halo overlay
+            coarse_if = _dilate_von_neumann(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
+            coarse_if_fine = _prolong_repeat(coarse_if.astype(cp.uint8), R).astype(cp.bool_)
+            fine_if = _dilate_von_neumann(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
+            halo_overlay = cp.zeros_like(L1_mask, dtype=cp.int8)
+            halo_overlay[coarse_if_fine] = 1
+            halo_overlay[fine_if] = 2
+            im3.set_data(cp.asnumpy(halo_overlay))
             plt.pause(max(0.001, args.interval / 1000.0))
 
     print(f"Avg per step: {total_gpu_ms/args.steps:.3f} ms GPU, {total_wall_ms/args.steps:.3f} ms wall")
