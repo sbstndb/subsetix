@@ -18,13 +18,10 @@ from typing import Tuple
 import cupy as cp
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import cm
-from matplotlib.collections import PatchCollection
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Rectangle
-from matplotlib.widgets import CheckButtons
 
-from . import MultiLevel2D, build_interval_set, prolong_set
+from . import MultiLevel2D, build_interval_set
+from .plot_utils import intervals_to_mask, plot_cell_layout_from_sets
 
 
 def _square_patch(width: int, height: int, x0: int, y0: int, size: int):
@@ -40,20 +37,6 @@ def _square_patch(width: int, height: int, x0: int, y0: int, size: int):
             end.append(x1)
         offsets.append(len(begin))
     return build_interval_set(row_offsets=offsets, begin=begin, end=end)
-
-
-def _intervals_to_mask(interval_set, width: int) -> np.ndarray:
-    offsets = cp.asnumpy(interval_set.row_offsets)
-    begin = cp.asnumpy(interval_set.begin)
-    end = cp.asnumpy(interval_set.end)
-    rows = offsets.size - 1
-    mask = np.zeros((rows, width), dtype=np.uint8)
-    for row in range(rows):
-        start = offsets[row]
-        stop = offsets[row + 1]
-        for idx in range(start, stop):
-            mask[row, begin[idx]:end[idx]] = 1
-    return mask
 
 
 def build_layout_levels(width: int, height: int, n_levels: int) -> MultiLevel2D:
@@ -97,35 +80,9 @@ def make_level_map(ml: MultiLevel2D, width: int) -> np.ndarray:
     for level, interval_set in enumerate(ml.levels):
         if interval_set is None:
             continue
-        mask = _intervals_to_mask(interval_set, width)
+        mask = intervals_to_mask(interval_set, width)
         level_map[mask == 1] = level
     return level_map
-
-
-def build_cell_rectangles(interval_set, base_dim: int, target_ratio: int, offset_x: float = 0.0):
-    if interval_set is None:
-        return []
-    row_count = interval_set.row_count
-    if row_count == 0:
-        return []
-    actual_ratio = max(1, row_count // base_dim)
-    if target_ratio % actual_ratio != 0:
-        raise ValueError("Ratios must divide the target ratio")
-    scale = target_ratio // actual_ratio
-    refined = prolong_set(interval_set, scale) if scale > 1 else interval_set
-    begin = cp.asnumpy(refined.begin)
-    end = cp.asnumpy(refined.end)
-    offsets = cp.asnumpy(refined.row_offsets)
-    cell_size = 1.0 / target_ratio
-    patches = []
-    for row in range(refined.row_count):
-        y = row / target_ratio
-        start = offsets[row]
-        stop = offsets[row + 1]
-        for idx in range(start, stop):
-            for x in range(begin[idx], end[idx]):
-                patches.append(Rectangle((x / target_ratio + offset_x, y), cell_size, cell_size))
-    return patches
 
 
 def plot_layout_heatmap(ml: MultiLevel2D, width: int) -> None:
@@ -160,64 +117,6 @@ def plot_layout_heatmap(ml: MultiLevel2D, width: int) -> None:
     cbar = fig.colorbar(im, ax=ax, ticks=range(len(ml.levels)))
     cbar.ax.set_yticklabels([f"Level {lvl}" for lvl in range(len(ml.levels))])
     plt.tight_layout()
-    plt.show()
-
-
-def plot_cell_layout_from_sets(level_sets, ratios, base_width, labels=None) -> None:
-    base_colors = ["#bdbdbd", "#ffb347", "#ff6961", "#8fd694", "#7fa2ff", "#c18aff"]
-    if labels is None:
-        labels = [f"Level {idx}" for idx in range(len(level_sets))]
-
-    finest_ratio = max(max(1, r) for r in ratios)
-
-    fig, ax = plt.subplots(figsize=(7, 7))
-    collections = []
-    for level, (interval_set, ratio) in enumerate(zip(level_sets, ratios)):
-        patches = build_cell_rectangles(interval_set, base_width, finest_ratio, offset_x=0.0)
-        collection = PatchCollection(
-            patches,
-            facecolor=base_colors[level % len(base_colors)],
-            edgecolor="k",
-            linewidth=0.3,
-        )
-        collection.set_visible(True)
-        collections.append(collection)
-        ax.add_collection(collection)
-
-    ax.set_xlim(0, base_width)
-    ax.set_ylim(0, base_width)
-    ax.set_aspect("equal")
-    ax.set_title("Refinement levels (per-cell view)")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_xticks(np.arange(0, base_width + 1, max(1, base_width // 8)))
-    ax.set_yticks(np.arange(0, base_width + 1, max(1, base_width // 8)))
-
-    fig.subplots_adjust(bottom=0.12)
-    w = 0.08
-    h = 0.03
-    checkbox_axes = []
-    for idx, label in enumerate(labels):
-        x = 0.05 + idx * (w + 0.02)
-        y = 0.04
-        cax = plt.axes([x, y, w, h], facecolor="lightgoldenrodyellow")
-        checkbox_axes.append(cax)
-    checkboxes = [
-        CheckButtons(cax, [labels[idx]], [collections[idx].get_visible()])
-        for idx, cax in enumerate(checkbox_axes)
-    ]
-
-    def make_callback(index: int):
-        def _cb(_label: str) -> None:
-            coll = collections[index]
-            coll.set_visible(not coll.get_visible())
-            fig.canvas.draw_idle()
-
-        return _cb
-
-    for idx, cb in enumerate(checkboxes):
-        cb.on_clicked(make_callback(idx))
-
     plt.show()
 
 

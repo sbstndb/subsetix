@@ -21,8 +21,6 @@ from typing import Tuple
 import cupy as cp
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.collections import PatchCollection
-from matplotlib.patches import Rectangle
 
 from . import (
     build_interval_set,
@@ -36,7 +34,12 @@ from . import (
     restrict_field,
     restrict_set,
 )
-from .demo_multilevel_layout import build_cell_rectangles, plot_cell_layout_from_sets
+from .plot_utils import (
+    field_collection_from_dense,
+    make_cell_collection,
+    plot_cell_layout_from_sets,
+    setup_cell_axes,
+)
 
 
 def _field_to_dense(field, width: int) -> np.ndarray:
@@ -92,36 +95,6 @@ def _make_circle_set(width: int, height: int, center: Tuple[int, int], radius: i
     return build_interval_set(row_offsets=offsets, begin=begin, end=end)
 
 
-def _cell_collection(interval_set, base_dim: int, ratio: int, facecolor: str, offset_x: float = 0.0):
-    patches = build_cell_rectangles(interval_set, base_dim, max(1, ratio), offset_x=offset_x)
-    return PatchCollection(patches, facecolor=facecolor, edgecolor="k", linewidth=0.3)
-
-
-def _field_collection_from_dense(interval_set, dense, base_dim: int, ratio: int, cmap, offset_x: float = 0.0):
-    if interval_set is None:
-        return PatchCollection([])
-    row_offsets = cp.asnumpy(interval_set.row_offsets)
-    begin = cp.asnumpy(interval_set.begin)
-    end = cp.asnumpy(interval_set.end)
-    row_count = interval_set.row_count
-    target_ratio = max(1, ratio)
-    cell_size = 1.0 / target_ratio
-    patches = []
-    values = []
-    for row in range(row_count):
-        y = row / target_ratio
-        start = row_offsets[row]
-        stop = row_offsets[row + 1]
-        for idx in range(start, stop):
-            for x in range(begin[idx], end[idx]):
-                rect = Rectangle((x / target_ratio + offset_x, y), cell_size, cell_size)
-                patches.append(rect)
-                values.append(dense[row, x])
-    collection = PatchCollection(patches, edgecolor="k", linewidth=0.15, cmap=cmap)
-    collection.set_array(np.array(values))
-    return collection
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-level interface refinement demo.")
     parser.add_argument("--coarse", type=int, default=64, help="Coarse resolution (square grid).")
@@ -166,60 +139,52 @@ def main() -> None:
         fig, axes = plt.subplots(2, 3, figsize=(15, 8))
         axes = axes.ravel()
         gap = width * 0.25
-        coarse_extent = (0, width, 0, height)
-        fine_extent = (width + gap, width + gap + width, 0, height)
 
-        coarse_coll = _cell_collection(coarse_set, width, 1, "#bdbdbd")
+        coarse_coll = make_cell_collection(coarse_set, width, 1, facecolor="#bdbdbd")
         axes[0].add_collection(coarse_coll)
-        axes[0].set_xlim(*coarse_extent[:2])
-        axes[0].set_ylim(0, height)
-        axes[0].set_aspect("equal")
-        axes[0].set_title("Coarse mask")
-        axes[0].axis("off")
+        setup_cell_axes(axes[0], width, height, title="Coarse mask")
 
-        fine_coll = _cell_collection(fine_union_set, width, ratio, "#ff6961", offset_x=width + gap)
+        fine_coll = make_cell_collection(
+            fine_union_set,
+            width,
+            ratio,
+            facecolor="#ff6961",
+            offset_x=width + gap,
+        )
         axes[1].add_collection(fine_coll)
-        axes[1].set_xlim(*fine_extent[:2])
-        axes[1].set_ylim(0, height)
-        axes[1].set_aspect("equal")
-        axes[1].set_title("Fine mask")
-        axes[1].axis("off")
+        setup_cell_axes(axes[1], width, height, title="Fine mask", offset=width + gap)
 
-        coarse_cover_coll = _cell_collection(coarse_cover, width, 1, "#8fd694")
+        coarse_cover_coll = make_cell_collection(coarse_cover, width, 1, facecolor="#8fd694")
         axes[2].add_collection(coarse_cover_coll)
-        axes[2].set_xlim(*coarse_extent[:2])
-        axes[2].set_ylim(0, height)
-        axes[2].set_aspect("equal")
-        axes[2].set_title("Coarse cover")
-        axes[2].axis("off")
+        setup_cell_axes(axes[2], width, height, title="Coarse cover")
 
-        coarse_delta_coll = _cell_collection(coarse_delta, width, 1, "#7fa2ff")
+        coarse_delta_coll = make_cell_collection(coarse_delta, width, 1, facecolor="#7fa2ff")
         axes[3].add_collection(coarse_delta_coll)
-        axes[3].set_xlim(*coarse_extent[:2])
-        axes[3].set_ylim(0, height)
-        axes[3].set_aspect("equal")
-        axes[3].set_title("New coarse coverage")
-        axes[3].axis("off")
+        setup_cell_axes(axes[3], width, height, title="New coarse coverage")
 
-        coarse_field_coll = _field_collection_from_dense(coarse_set, coarse_dense, width, 1, plt.get_cmap("viridis"))
+        coarse_field_coll = field_collection_from_dense(
+            coarse_set,
+            coarse_dense,
+            width,
+            1,
+            plt.get_cmap("viridis"),
+        )
         axes[4].add_collection(coarse_field_coll)
-        axes[4].set_xlim(*coarse_extent[:2])
-        axes[4].set_ylim(0, height)
-        axes[4].set_aspect("equal")
-        axes[4].set_title("Coarse field")
+        setup_cell_axes(axes[4], width, height, title="Coarse field")
         fig.colorbar(coarse_field_coll, ax=axes[4])
 
         delta_colormap = plt.get_cmap("coolwarm")
-        delta_collection = _field_collection_from_dense(coarse_set, field_delta, width, 1, delta_colormap)
+        delta_collection = field_collection_from_dense(
+            coarse_set,
+            field_delta,
+            width,
+            1,
+            delta_colormap,
+        )
         axes[5].add_collection(delta_collection)
-        axes[5].set_xlim(*coarse_extent[:2])
-        axes[5].set_ylim(0, height)
-        axes[5].set_aspect("equal")
-        axes[5].set_title("Field delta")
+        setup_cell_axes(axes[5], width, height, title="Field delta")
         fig.colorbar(delta_collection, ax=axes[5])
 
-        for ax in axes:
-            ax.axis("off")
         fig.tight_layout()
         plt.show()
 

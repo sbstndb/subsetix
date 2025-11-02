@@ -31,6 +31,7 @@ from . import (
     make_intersection,
     make_union,
 )
+from .plot_utils import intervals_to_mask as _mask_from_intervals
 
 Rectangle = Tuple[int, int, int, int]  # (x0, x1, y0, y1)
 Circle = Tuple[int, int, int]  # (cx, cy, radius)
@@ -101,20 +102,8 @@ def _rows_to_interval_set(rows: Sequence[Sequence[Tuple[int, int]]]) -> Interval
 
 
 def _intervals_to_mask(interval_set: IntervalSet, width: int) -> Tuple[np.ndarray, np.ndarray]:
-    offsets = cp.asnumpy(interval_set.row_offsets).copy()
-    begin = cp.asnumpy(interval_set.begin).copy()
-    end = cp.asnumpy(interval_set.end).copy()
-    row_count = offsets.shape[0] - 1
-    mask = np.zeros((row_count, width), dtype=np.uint8)
-    begin_len = begin.shape[0]
-    for row in range(row_count):
-        start = int(offsets[row])
-        stop = int(offsets[row + 1])
-        if start >= begin_len:
-            continue
-        stop = min(stop, begin_len)
-        for idx in range(start, stop):
-            mask[row, begin[idx] : end[idx]] = 1
+    mask = _mask_from_intervals(interval_set, width)
+    offsets = cp.asnumpy(interval_set.row_offsets)
     return mask, offsets
 
 
