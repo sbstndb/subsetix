@@ -130,6 +130,50 @@ def _erode_vn(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
     return mask & up & down & left & right
 
 
+def _dilate_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
+    if wrap:
+        up = cp.roll(mask, -1, axis=0)
+        down = cp.roll(mask, 1, axis=0)
+        left = cp.roll(mask, 1, axis=1)
+        right = cp.roll(mask, -1, axis=1)
+        up_left = cp.roll(up, 1, axis=1)
+        up_right = cp.roll(up, -1, axis=1)
+        down_left = cp.roll(down, 1, axis=1)
+        down_right = cp.roll(down, -1, axis=1)
+    else:
+        H, W = mask.shape
+        up = cp.zeros_like(mask); up[1:, :] = mask[:-1, :]
+        down = cp.zeros_like(mask); down[:-1, :] = mask[1:, :]
+        left = cp.zeros_like(mask); left[:, 1:] = mask[:, :-1]
+        right = cp.zeros_like(mask); right[:, :-1] = mask[:, 1:]
+        up_left = cp.zeros_like(mask); up_left[1:, 1:] = mask[:-1, :-1]
+        up_right = cp.zeros_like(mask); up_right[1:, :-1] = mask[:-1, 1:]
+        down_left = cp.zeros_like(mask); down_left[:-1, 1:] = mask[1:, :-1]
+        down_right = cp.zeros_like(mask); down_right[:-1, :-1] = mask[1:, 1:]
+    return mask | up | down | left | right | up_left | up_right | down_left | down_right
+
+
+def _erode_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
+    if wrap:
+        up = cp.roll(mask, -1, axis=0)
+        down = cp.roll(mask, 1, axis=0)
+        left = cp.roll(mask, 1, axis=1)
+        right = cp.roll(mask, -1, axis=1)
+        up_left = cp.roll(up, 1, axis=1)
+        up_right = cp.roll(up, -1, axis=1)
+        down_left = cp.roll(down, 1, axis=1)
+        down_right = cp.roll(down, -1, axis=1)
+    else:
+        H, W = mask.shape
+        up = cp.zeros_like(mask); up[1:, :] = mask[:-1, :]
+        down = cp.zeros_like(mask); down[:-1, :] = mask[1:, :]
+        left = cp.zeros_like(mask); left[:, 1:] = mask[:, :-1]
+        right = cp.zeros_like(mask); right[:, :-1] = mask[:, 1:]
+        up_left = cp.zeros_like(mask); up_left[1:, 1:] = mask[:-1, :-1]
+        up_right = cp.zeros_like(mask); up_right[1:, :-1] = mask[:-1, 1:]
+        down_left = cp.zeros_like(mask); down_left[:-1, 1:] = mask[1:, :-1]
+        down_right = cp.zeros_like(mask); down_right[:-1, :-1] = mask[1:, 1:]
+    return mask & up & down & left & right & up_left & up_right & down_left & down_right
 def _hysteresis_mask(g: cp.ndarray, frac_high: float, frac_low: float, prev: cp.ndarray | None) -> cp.ndarray:
     frac_high = max(0.0, min(1.0, float(frac_high)))
     frac_low = max(0.0, min(frac_high, float(frac_low)))
@@ -158,6 +202,7 @@ def main():
     ap.add_argument("--bc", type=str, choices=["clamp", "wrap"], default="clamp")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--interval", type=int, default=60)
+    ap.add_argument("--grading", type=str, choices=["vn","moore"], default="moore", help="Grading connectivity (vn=4, moore=8)")
     ap.add_argument("--ic", type=str, choices=["gauss", "sharp", "disk", "square", "edge"], default="sharp")
     ap.add_argument("--ic-amp", type=float, default=1.0)
     args = ap.parse_args()
@@ -185,7 +230,9 @@ def main():
     g1 = _grad_mag(u1)
     refine1_mid = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, None)
     # Enforce grading: L2 must be at least one mid-cell away from L1 boundary
-    refine1_mid = refine1_mid & _erode_vn(L1_mask, wrap=(args.bc == 'wrap'))
+    refine1_mid = refine1_mid & (
+        _erode_mo(L1_mask, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask, wrap=(args.bc == 'wrap'))
+    )
     L2_mask = _prolong_repeat(refine1_mid.astype(cp.uint8), R).astype(cp.bool_)
 
     # Plot setup
@@ -209,13 +256,14 @@ def main():
         im2 = ax2.imshow(cp.asnumpy(level_map), origin="lower", cmap=levels_cmap, vmin=0, vmax=2)
         ax2.set_title("Level map (0/1/2)"); ax2.set_axis_off()
         # Halos overlays on fine grid: 1/2 = L0-L1 halos, 3/4 = L1-L2 halos
-        coarse_if = _dilate_vn(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
+        _dilate = _dilate_mo if args.grading == 'moore' else _dilate_vn
+        coarse_if = _dilate(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
         coarse_if_f = _prolong_repeat(coarse_if.astype(cp.uint8), R * R).astype(cp.bool_)
-        fine1_if = _dilate_vn(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
+        fine1_if = _dilate(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
         fine1_if_f = _prolong_repeat(fine1_if.astype(cp.uint8), R).astype(cp.bool_)
-        mid_if = _dilate_vn(refine1_mid, wrap=(args.bc == 'wrap')) & (~refine1_mid)
+        mid_if = _dilate(refine1_mid, wrap=(args.bc == 'wrap')) & (~refine1_mid)
         mid_if_f = _prolong_repeat(mid_if.astype(cp.uint8), R).astype(cp.bool_)
-        fine2_if = _dilate_vn(L2_mask, wrap=(args.bc == 'wrap')) & (~L2_mask)
+        fine2_if = _dilate(L2_mask, wrap=(args.bc == 'wrap')) & (~L2_mask)
         halo = cp.zeros_like(L2_mask, dtype=cp.int8)
         halo[coarse_if_f] = 1
         halo[fine1_if_f] = 2
@@ -235,13 +283,13 @@ def main():
     for step in range(int(args.steps)):
         # Interface halos and pad arrays before stencil
         # L0<->L1
-        coarse_if = _dilate_vn(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
+        coarse_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
         u1_restr = _restrict_mean(u1, R)
         u0_pad = u0.copy()
         u0_pad[refine0] = u1_restr[refine0]
         u0_pad[coarse_if] = u1_restr[coarse_if]
         # L1<->L2
-        mid_if = _dilate_vn(refine1_mid, wrap=(args.bc == 'wrap')) & (~refine1_mid)
+        mid_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(refine1_mid, wrap=(args.bc == 'wrap')) & (~refine1_mid)
         u2_restr = _restrict_mean(u2, R)
         u1_pad = u1.copy()
         # Outside L1 from prolong(u0)
@@ -288,7 +336,9 @@ def main():
             g1 = _grad_mag(u1)
             refine1_mid_new = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, refine1_mid)
             # Enforce grading again with the updated L1
-            refine1_mid_new = refine1_mid_new & _erode_vn(L1_mask_new, wrap=(args.bc == 'wrap'))
+            refine1_mid_new = refine1_mid_new & (
+                _erode_mo(L1_mask_new, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask_new, wrap=(args.bc == 'wrap'))
+            )
 
             # Transfers L2<->L1
             leaving2 = refine1_mid & (~refine1_mid_new)
@@ -324,13 +374,13 @@ def main():
             im1.set_data(cp.asnumpy(composite)); im1.set_clim(vmin=0.0, vmax=float(composite.max()))
             level_map = cp.zeros_like(L2_mask, dtype=cp.int8); level_map[L1_f] = 1; level_map[L2_mask] = 2
             im2.set_data(cp.asnumpy(level_map))
-            coarse_if = _dilate_vn(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
+            coarse_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(refine0, wrap=(args.bc == 'wrap')) & (~refine0)
             coarse_if_f = _prolong_repeat(coarse_if.astype(cp.uint8), R * R).astype(cp.bool_)
-            fine1_if = _dilate_vn(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
+            fine1_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(L1_mask, wrap=(args.bc == 'wrap')) & (~L1_mask)
             fine1_if_f = _prolong_repeat(fine1_if.astype(cp.uint8), R).astype(cp.bool_)
-            mid_if = _dilate_vn(refine1_mid, wrap=(args.bc == 'wrap')) & (~refine1_mid)
+            mid_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(refine1_mid, wrap=(args.bc == 'wrap')) & (~refine1_mid)
             mid_if_f = _prolong_repeat(mid_if.astype(cp.uint8), R).astype(cp.bool_)
-            fine2_if = _dilate_vn(L2_mask, wrap=(args.bc == 'wrap')) & (~L2_mask)
+            fine2_if = (_dilate_mo if args.grading=='moore' else _dilate_vn)(L2_mask, wrap=(args.bc == 'wrap')) & (~L2_mask)
             halo = cp.zeros_like(L2_mask, dtype=cp.int8)
             halo[coarse_if_f] = 1; halo[fine1_if_f] = 2; halo[mid_if_f] = 3; halo[fine2_if] = 4
             im3.set_data(cp.asnumpy(halo))
