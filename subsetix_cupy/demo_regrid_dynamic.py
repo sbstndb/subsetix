@@ -211,12 +211,16 @@ def main():
             H0 = None
             H1 = None
 
-        # Rebuild collections each frame for simplicity and correctness
-        del axes[0].collections[:]
-        del axes[1].collections[:]
+        # Rebuild collections each frame: remove existing artists robustly
+        for art in list(axes[0].collections):
+            art.remove()
+        for art in list(axes[1].collections):
+            art.remove()
         if args.show_halos:
-            del axes[2].collections[:]
-            del axes[3].collections[:]
+            for art in list(axes[2].collections):
+                art.remove()
+            for art in list(axes[3].collections):
+                art.remove()
 
         axes[0].add_collection(make_cell_collection(R0, width, 1, facecolor="#ffb347"))
         setup_cell_axes(axes[0], width, height, title="Refine mask (L0)")
@@ -232,7 +236,8 @@ def main():
             setup_cell_axes(axes[3], width, height, title="H1 (fine)")
 
         ax_idx = 2 if not args.show_halos else 4
-        del axes[ax_idx].collections[:]
+        for art in list(axes[ax_idx].collections):
+            art.remove()
         axes[ax_idx].add_collection(make_cell_collection(L0, width, 1, facecolor="#bdbdbd"))
         setup_cell_axes(axes[ax_idx], width, height, title="L0 (coarse)")
 
