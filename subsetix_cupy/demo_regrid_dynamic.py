@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import math
 from typing import Tuple, Optional
+import time
 
 import cupy as cp
 import matplotlib.pyplot as plt
@@ -136,6 +137,11 @@ def main():
         # Headless run prints simple stats per frame
         for f in range(args.frames):
             t = f / max(1, args.frames - 1)
+            ev_start = cp.cuda.Event()
+            ev_stop = cp.cuda.Event()
+            wall_start = time.perf_counter()
+            ev_start.record()
+
             u = _analytic_field_t(width, height, t)
             g = _grad_mag(u) * coarse_mask
             valid = g[coarse_mask.astype(bool)]
@@ -144,12 +150,17 @@ def main():
             L1 = prolong_set(R0, ratio)
             C0 = evaluate(make_difference(make_input(L0), make_input(restrict_set(L1, ratio))))
             composite = evaluate(make_union(make_input(L1), make_input(prolong_set(C0, ratio))))
+
+            ev_stop.record()
+            ev_stop.synchronize()
+            wall_ms = (time.perf_counter() - wall_start) * 1000.0
+            gpu_ms = cp.cuda.get_elapsed_time(ev_start, ev_stop)
             # quick counts
             import numpy as np
             c0 = int(cp.asnumpy(C0.row_offsets)[-1])
             l1 = int(cp.asnumpy(L1.row_offsets)[-1])
             comp = int(cp.asnumpy(composite.row_offsets)[-1])
-            print(f"frame {f:03d}: C0={c0} L1={l1} comp={comp}")
+            print(f"frame {f:03d}: compute {gpu_ms:.3f} ms GPU, {wall_ms:.3f} ms wall | C0={c0} L1={l1} comp={comp}")
         return
 
     # Plot setup
@@ -192,6 +203,10 @@ def main():
         return []
 
     def update(frame_idx):
+        ev_start = cp.cuda.Event()
+        ev_stop = cp.cuda.Event()
+        wall_start = time.perf_counter()
+        ev_start.record()
         t = frame_idx / max(1, args.frames - 1)
         u = _analytic_field_t(width, height, t)
         g = _grad_mag(u) * coarse_mask
@@ -210,6 +225,15 @@ def main():
         else:
             H0 = None
             H1 = None
+
+        ev_stop.record()
+        ev_stop.synchronize()
+        wall_ms = (time.perf_counter() - wall_start) * 1000.0
+        gpu_ms = cp.cuda.get_elapsed_time(ev_start, ev_stop)
+        # Print compute-only timing (excludes the plotting that follows)
+        c0 = int(cp.asnumpy(C0.row_offsets)[-1])
+        l1 = int(cp.asnumpy(L1.row_offsets)[-1])
+        print(f"frame {frame_idx:03d}: compute {gpu_ms:.3f} ms GPU, {wall_ms:.3f} ms wall | C0={c0} L1={l1}")
 
         # Rebuild collections each frame: remove existing artists robustly
         for art in list(axes[0].collections):
