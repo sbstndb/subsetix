@@ -41,6 +41,9 @@ def _validate_ratios(ratios: List[int]) -> None:
             raise ValueError("each ratio must be a multiple of the previous")
 
 
+_REDUCER_CODES = {"mean": 0, "sum": 1, "min": 2, "max": 3}
+
+
 @dataclass
 class MultiLevel2D:
     """
@@ -161,6 +164,36 @@ def _row_ids(interval_set: IntervalSet):
     idx = cp.arange(total, dtype=cp.int32)
     # For idx in [row_offsets[r], row_offsets[r+1]) → searchsorted(row_offsets[1:], idx) == r
     return cp.searchsorted(row_offsets[1:], idx, side='right').astype(cp.int32, copy=False)
+
+
+def _coarse_to_fine_interval_indices(
+    coarse_set: IntervalSet,
+    fine_set: IntervalSet,
+    ratio: int,
+):
+    cp = _require_cupy()
+    if ratio < 1:
+        raise ValueError("ratio must be >= 1")
+
+    coarse_row_count = coarse_set.row_count
+    expected_fine_rows = coarse_row_count * ratio
+    if fine_set.row_count != expected_fine_rows:
+        raise ValueError("fine set row count does not match coarse x ratio")
+
+    interval_count = coarse_set.begin.size
+    if interval_count == 0:
+        return cp.zeros(0, dtype=cp.int32)
+
+    coarse_rows = _row_ids(coarse_set).astype(cp.int32, copy=False)
+    coarse_row_offsets = coarse_set.row_offsets.astype(cp.int32, copy=False)
+    ordinal = cp.arange(interval_count, dtype=cp.int32)
+    ordinal = ordinal - coarse_row_offsets.take(coarse_rows)
+
+    ratio_vec = cp.arange(ratio, dtype=cp.int32)
+    fine_rows = coarse_rows[:, None] * ratio + ratio_vec[None, :]
+    fine_row_offsets = fine_set.row_offsets.astype(cp.int32, copy=False)
+    fine_interval_indices = fine_row_offsets[fine_rows] + ordinal[:, None]
+    return fine_interval_indices.reshape(-1).astype(cp.int32, copy=False)
 
 
 def _prolong_set_impl(interval_set: IntervalSet, ratio: int):
@@ -308,25 +341,79 @@ def restrict_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
 
 def prolong_field(field: IntervalField, ratio: int) -> IntervalField:
     cp = _require_cupy()
-    fine_set, base_indices = _prolong_set_impl(field.interval_set, ratio)
+    if ratio < 1:
+        raise ValueError("ratio must be >= 1")
+
+    fine_set, _ = _prolong_set_impl(field.interval_set, ratio)
     fine_field = create_interval_field(fine_set, fill_value=0.0, dtype=field.values.dtype)
+
     if fine_field.values.size == 0 or field.values.size == 0:
         return fine_field
+    if ratio == 1:
+        fine_field.values[...] = field.values
+        return fine_field
 
-    coarse_offsets = field.interval_cell_offsets
-    fine_offsets = fine_field.interval_cell_offsets
+    ratio_int = int(ratio)
+    coarse_set = field.interval_set
+    interval_count = coarse_set.begin.size
+    if interval_count == 0:
+        return fine_field
 
-    for fine_interval in range(base_indices.size):
-        base_interval = int(base_indices[fine_interval].item())
-        start_coarse = int(coarse_offsets[base_interval].item())
-        end_coarse = int(coarse_offsets[base_interval + 1].item())
-        if end_coarse <= start_coarse:
-            continue
-        segment = field.values[start_coarse:end_coarse]
-        expanded = cp.repeat(segment, ratio)
-        start_fine = int(fine_offsets[fine_interval].item())
-        end_fine = int(fine_offsets[fine_interval + 1].item())
-        fine_field.values[start_fine:end_fine] = expanded
+    coarse_offsets = field.interval_cell_offsets.astype(cp.int32, copy=False)
+    fine_offsets = fine_field.interval_cell_offsets.astype(cp.int32, copy=False)
+    fine_interval_indices = _coarse_to_fine_interval_indices(coarse_set, fine_set, ratio_int)
+
+    kernels = get_kernels(cp)
+    block = 128
+    grid = (int(interval_count),)
+    dtype = fine_field.values.dtype
+
+    if dtype == cp.float32:
+        kernels[5](
+            grid,
+            (block,),
+            (
+                coarse_offsets,
+                fine_offsets,
+                fine_interval_indices,
+                np.int32(ratio_int),
+                np.int32(interval_count),
+                field.values,
+                fine_field.values,
+            ),
+        )
+    elif dtype == cp.float64:
+        kernels[6](
+            grid,
+            (block,),
+            (
+                coarse_offsets,
+                fine_offsets,
+                fine_interval_indices,
+                np.int32(ratio_int),
+                np.int32(interval_count),
+                field.values,
+                fine_field.values,
+            ),
+        )
+    else:
+        # Fallback: cast through float32 to remain functional for uncommon dtypes.
+        tmp_in = field.values.astype(cp.float32, copy=False)
+        tmp_out = fine_field.values.astype(cp.float32, copy=False)
+        kernels[5](
+            grid,
+            (block,),
+            (
+                coarse_offsets,
+                fine_offsets,
+                fine_interval_indices,
+                np.int32(ratio_int),
+                np.int32(interval_count),
+                tmp_in,
+                tmp_out,
+            ),
+        )
+        fine_field.values[...] = tmp_out.astype(dtype, copy=False)
 
     return fine_field
 
@@ -344,57 +431,90 @@ def restrict_field(field: IntervalField, ratio: int, *, reducer: str = "mean") -
     if field.values.size == 0 or coarse_field.values.size == 0:
         return coarse_field
 
-    fine_offsets = field.interval_cell_offsets
-    coarse_offsets = coarse_field.interval_cell_offsets
-    fine_row_offsets = fine_set.row_offsets
-    coarse_row_offsets = coarse_set.row_offsets
-    fine_begin = fine_set.begin
-    fine_end = fine_set.end
-    coarse_begin = coarse_set.begin
-    coarse_end = coarse_set.end
+    ratio_int = int(ratio)
+    if ratio_int <= 0:
+        raise ValueError("ratio must be >= 1")
+    if ratio_int == 1:
+        coarse_field.values[...] = field.values.astype(target_dtype, copy=False)
+        return coarse_field
 
-    ratio_y = ratio
-    for coarse_row in range(coarse_set.row_count):
-        fine_row_first = coarse_row * ratio_y
-        coarse_interval_start = int(coarse_row_offsets[coarse_row].item())
-        coarse_interval_end = int(coarse_row_offsets[coarse_row + 1].item())
-        for coarse_interval in range(coarse_interval_start, coarse_interval_end):
-            start_coarse = int(coarse_offsets[coarse_interval].item())
-            end_coarse = int(coarse_offsets[coarse_interval + 1].item())
-            width = end_coarse - start_coarse
-            if width <= 0:
-                continue
-            slices = []
-            for delta in range(ratio_y):
-                fine_row = fine_row_first + delta
-                fine_interval_start = int(fine_row_offsets[fine_row].item())
-                fine_interval_end = int(fine_row_offsets[fine_row + 1].item())
-                matched = None
-                for fine_interval in range(fine_interval_start, fine_interval_end):
-                    b_f = int(fine_begin[fine_interval].item())
-                    e_f = int(fine_end[fine_interval].item())
-                    b_c = b_f // ratio
-                    e_c = _ceil_div(e_f, ratio)
-                    if b_c == int(coarse_begin[coarse_interval].item()) and e_c == int(coarse_end[coarse_interval].item()):
-                        matched = field.values[
-                            int(fine_offsets[fine_interval].item()): int(fine_offsets[fine_interval + 1].item())
-                        ]
-                        break
-                if matched is None:
-                    raise ValueError("fine field is not aligned with coarse geometry for restriction")
-                slices.append(matched.reshape(width, ratio))
-            stack = cp.stack(slices, axis=0)  # (ratio, width, ratio)
-            if reducer == "mean":
-                reduced = stack.mean(axis=(0, 2))
-            elif reducer == "sum":
-                reduced = stack.sum(axis=(0, 2))
-            elif reducer == "min":
-                reduced = cp.min(stack, axis=(0, 2))
-            elif reducer == "max":
-                reduced = cp.max(stack, axis=(0, 2))
-            else:
-                raise ValueError(f"unsupported reducer '{reducer}'")
-            coarse_field.values[start_coarse:end_coarse] = reduced.astype(target_dtype, copy=False)
+    reducer_code = _REDUCER_CODES.get(reducer)
+    if reducer_code is None:
+        raise ValueError(f"unsupported reducer '{reducer}'")
+
+    interval_count = coarse_set.begin.size
+    if interval_count == 0:
+        return coarse_field
+
+    fine_interval_indices = _coarse_to_fine_interval_indices(coarse_set, fine_set, ratio_int)
+    expected = interval_count * ratio_int
+    if fine_interval_indices.size != expected:
+        raise ValueError("interval mapping mismatch for restriction")
+
+    coarse_offsets = coarse_field.interval_cell_offsets.astype(cp.int32, copy=False)
+    fine_offsets = field.interval_cell_offsets.astype(cp.int32, copy=False)
+
+    kernels = get_kernels(cp)
+    block = 128
+    grid = (int(interval_count),)
+    samples = ratio_int * ratio_int
+
+    if coarse_field.values.dtype == cp.float32:
+        norm = np.float32(1.0 / samples if reducer_code == 0 else 1.0)
+        fine_values = field.values.astype(cp.float32, copy=False)
+        kernels[7](
+            grid,
+            (block,),
+            (
+                coarse_offsets,
+                fine_offsets,
+                fine_interval_indices,
+                np.int32(ratio_int),
+                np.int32(interval_count),
+                np.int32(reducer_code),
+                norm,
+                fine_values,
+                coarse_field.values,
+            ),
+        )
+    elif coarse_field.values.dtype == cp.float64:
+        norm = np.float64(1.0 / samples if reducer_code == 0 else 1.0)
+        fine_values = field.values.astype(cp.float64, copy=False)
+        kernels[8](
+            grid,
+            (block,),
+            (
+                coarse_offsets,
+                fine_offsets,
+                fine_interval_indices,
+                np.int32(ratio_int),
+                np.int32(interval_count),
+                np.int32(reducer_code),
+                norm,
+                fine_values,
+                coarse_field.values,
+            ),
+        )
+    else:
+        norm = np.float32(1.0 / samples if reducer_code == 0 else 1.0)
+        fine_values = field.values.astype(cp.float32, copy=False)
+        tmp = cp.empty_like(coarse_field.values, dtype=cp.float32)
+        kernels[7](
+            grid,
+            (block,),
+            (
+                coarse_offsets,
+                fine_offsets,
+                fine_interval_indices,
+                np.int32(ratio_int),
+                np.int32(interval_count),
+                np.int32(reducer_code),
+                norm,
+                fine_values,
+                tmp,
+            ),
+        )
+        coarse_field.values[...] = tmp.astype(coarse_field.values.dtype, copy=False)
 
     return coarse_field
 

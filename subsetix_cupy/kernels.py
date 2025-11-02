@@ -5,7 +5,7 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Any, Dict, Tuple
 
-_CACHE: Dict[int, Tuple[Any, Any, Any, Any, Any]] = {}
+_CACHE: Dict[int, Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]] = {}
 
 
 _COUNT_SRC = dedent(
@@ -263,7 +263,29 @@ def get_kernels(cp_module):
     merge_write_kernel = cp_module.RawKernel(
         _MERGE_WRITE_SRC, "write_merged_segments", options=("--std=c++11",)
     )
-    _CACHE[key] = (count_kernel, write_kernel, None, merge_count_kernel, merge_write_kernel)
+    prolong_f32_kernel = cp_module.RawKernel(
+        _PROLONG_FIELD_F32_SRC, "prolong_field_f32", options=("--std=c++11",)
+    )
+    prolong_f64_kernel = cp_module.RawKernel(
+        _PROLONG_FIELD_F64_SRC, "prolong_field_f64", options=("--std=c++11",)
+    )
+    restrict_f32_kernel = cp_module.RawKernel(
+        _RESTRICT_FIELD_F32_SRC, "restrict_field_f32", options=("--std=c++11",)
+    )
+    restrict_f64_kernel = cp_module.RawKernel(
+        _RESTRICT_FIELD_F64_SRC, "restrict_field_f64", options=("--std=c++11",)
+    )
+    _CACHE[key] = (
+        count_kernel,
+        write_kernel,
+        None,
+        merge_count_kernel,
+        merge_write_kernel,
+        prolong_f32_kernel,
+        prolong_f64_kernel,
+        restrict_f32_kernel,
+        restrict_f64_kernel,
+    )
     return _CACHE[key]
 
 
@@ -359,4 +381,222 @@ _MERGE_WRITE_SRC = dedent(
 )
 
 
-# (no prolong_field kernels; prolongation is handled at higher level)
+_PROLONG_FIELD_F32_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void prolong_field_f32(const int* coarse_offsets,
+                           const int* fine_offsets,
+                           const int* fine_interval_indices,
+                           int ratio,
+                           int interval_count,
+                           const float* coarse_values,
+                           float* fine_values)
+    {
+        int coarse_idx = blockIdx.x;
+        if (coarse_idx >= interval_count) return;
+
+        int coarse_begin = coarse_offsets[coarse_idx];
+        int coarse_end = coarse_offsets[coarse_idx + 1];
+        int width = coarse_end - coarse_begin;
+        if (width <= 0) {
+            return;
+        }
+
+        int base = coarse_idx * ratio;
+        for (int delta = 0; delta < ratio; ++delta) {
+            int fine_interval = fine_interval_indices[base + delta];
+            int fine_begin = fine_offsets[fine_interval];
+            int fine_end = fine_offsets[fine_interval + 1];
+            int fine_width = fine_end - fine_begin;
+            for (int k = threadIdx.x; k < fine_width; k += blockDim.x) {
+                int src = coarse_begin + k / ratio;
+                fine_values[fine_begin + k] = coarse_values[src];
+            }
+        }
+    }
+    """
+)
+
+
+_PROLONG_FIELD_F64_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void prolong_field_f64(const int* coarse_offsets,
+                           const int* fine_offsets,
+                           const int* fine_interval_indices,
+                           int ratio,
+                           int interval_count,
+                           const double* coarse_values,
+                           double* fine_values)
+    {
+        int coarse_idx = blockIdx.x;
+        if (coarse_idx >= interval_count) return;
+
+        int coarse_begin = coarse_offsets[coarse_idx];
+        int coarse_end = coarse_offsets[coarse_idx + 1];
+        int width = coarse_end - coarse_begin;
+        if (width <= 0) {
+            return;
+        }
+
+        int base = coarse_idx * ratio;
+        for (int delta = 0; delta < ratio; ++delta) {
+            int fine_interval = fine_interval_indices[base + delta];
+            int fine_begin = fine_offsets[fine_interval];
+            int fine_end = fine_offsets[fine_interval + 1];
+            int fine_width = fine_end - fine_begin;
+            for (int k = threadIdx.x; k < fine_width; k += blockDim.x) {
+                int src = coarse_begin + k / ratio;
+                fine_values[fine_begin + k] = coarse_values[src];
+            }
+        }
+    }
+    """
+)
+
+
+_RESTRICT_FIELD_F32_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void restrict_field_f32(const int* coarse_offsets,
+                            const int* fine_offsets,
+                            const int* fine_interval_indices,
+                            int ratio,
+                            int interval_count,
+                            int reducer,
+                            float norm,
+                            const float* fine_values,
+                            float* coarse_values)
+    {
+        int coarse_idx = blockIdx.x;
+        if (coarse_idx >= interval_count) return;
+
+        int coarse_begin = coarse_offsets[coarse_idx];
+        int coarse_end = coarse_offsets[coarse_idx + 1];
+        int width = coarse_end - coarse_begin;
+        if (width <= 0) {
+            return;
+        }
+
+        int base = coarse_idx * ratio;
+
+        for (int k = threadIdx.x; k < width; k += blockDim.x) {
+            float acc = 0.0f;
+            float min_val = 0.0f;
+            float max_val = 0.0f;
+            bool have_val = false;
+
+            for (int dy = 0; dy < ratio; ++dy) {
+                int fine_interval = fine_interval_indices[base + dy];
+                int fine_begin = fine_offsets[fine_interval];
+                int fine_end = fine_offsets[fine_interval + 1];
+                int start = fine_begin + k * ratio;
+                for (int dx = 0; dx < ratio; ++dx) {
+                    int idx = start + dx;
+                    if (idx >= fine_end) break;
+                    float v = fine_values[idx];
+                    if (reducer == 2) {
+                        if (!have_val || v < min_val) {
+                            min_val = v;
+                        }
+                    } else if (reducer == 3) {
+                        if (!have_val || v > max_val) {
+                            max_val = v;
+                        }
+                    } else {
+                        acc += v;
+                    }
+                    have_val = true;
+                }
+            }
+
+            float result;
+            if (reducer == 0) {
+                result = acc * norm;
+            } else if (reducer == 1) {
+                result = acc;
+            } else if (reducer == 2) {
+                result = min_val;
+            } else {
+                result = max_val;
+            }
+            coarse_values[coarse_begin + k] = result;
+        }
+    }
+    """
+)
+
+
+_RESTRICT_FIELD_F64_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void restrict_field_f64(const int* coarse_offsets,
+                            const int* fine_offsets,
+                            const int* fine_interval_indices,
+                            int ratio,
+                            int interval_count,
+                            int reducer,
+                            double norm,
+                            const double* fine_values,
+                            double* coarse_values)
+    {
+        int coarse_idx = blockIdx.x;
+        if (coarse_idx >= interval_count) return;
+
+        int coarse_begin = coarse_offsets[coarse_idx];
+        int coarse_end = coarse_offsets[coarse_idx + 1];
+        int width = coarse_end - coarse_begin;
+        if (width <= 0) {
+            return;
+        }
+
+        int base = coarse_idx * ratio;
+
+        for (int k = threadIdx.x; k < width; k += blockDim.x) {
+            double acc = 0.0;
+            double min_val = 0.0;
+            double max_val = 0.0;
+            bool have_val = false;
+
+            for (int dy = 0; dy < ratio; ++dy) {
+                int fine_interval = fine_interval_indices[base + dy];
+                int fine_begin = fine_offsets[fine_interval];
+                int fine_end = fine_offsets[fine_interval + 1];
+                int start = fine_begin + k * ratio;
+                for (int dx = 0; dx < ratio; ++dx) {
+                    int idx = start + dx;
+                    if (idx >= fine_end) break;
+                    double v = fine_values[idx];
+                    if (reducer == 2) {
+                        if (!have_val || v < min_val) {
+                            min_val = v;
+                        }
+                    } else if (reducer == 3) {
+                        if (!have_val || v > max_val) {
+                            max_val = v;
+                        }
+                    } else {
+                        acc += v;
+                    }
+                    have_val = true;
+                }
+            }
+
+            double result;
+            if (reducer == 0) {
+                result = acc * norm;
+            } else if (reducer == 1) {
+                result = acc;
+            } else if (reducer == 2) {
+                result = min_val;
+            } else {
+                result = max_val;
+            }
+            coarse_values[coarse_begin + k] = result;
+        }
+    }
+    """
+)
+
+
+# Prolongation/restriction kernels are used by multilevel field transfers to avoid host round-trips.
