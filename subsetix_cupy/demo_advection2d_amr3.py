@@ -29,6 +29,133 @@ from .plot_utils import make_cell_collection, setup_cell_axes
 from .export_vtk import save_amr3_step_vtr, save_amr3_mesh_vtu, write_pvd
 
 
+_DENSE_KERNEL_CACHE = {}
+
+_PROLONG_F32_SRC = r"""
+extern "C" __global__
+void prolong_dense_f32(const float* src, float* dst, int H, int W, int R)
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int HR = H * R;
+    int WR = W * R;
+    if (row >= HR || col >= WR) return;
+    int src_row = row / R;
+    int src_col = col / R;
+    dst[row * WR + col] = src[src_row * W + src_col];
+}
+"""
+
+_PROLONG_F64_SRC = r"""
+extern "C" __global__
+void prolong_dense_f64(const double* src, double* dst, int H, int W, int R)
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int HR = H * R;
+    int WR = W * R;
+    if (row >= HR || col >= WR) return;
+    int src_row = row / R;
+    int src_col = col / R;
+    dst[row * WR + col] = src[src_row * W + src_col];
+}
+"""
+
+_PROLONG_U8_SRC = r"""
+extern "C" __global__
+void prolong_dense_u8(const unsigned char* src, unsigned char* dst, int H, int W, int R)
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int HR = H * R;
+    int WR = W * R;
+    if (row >= HR || col >= WR) return;
+    int src_row = row / R;
+    int src_col = col / R;
+    dst[row * WR + col] = src[src_row * W + src_col];
+}
+"""
+
+_RESTRICT_F32_SRC = r"""
+extern "C" __global__
+void restrict_mean_f32(const float* src, float* dst, int H, int W, int R)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = H * W;
+    if (idx >= total) return;
+    int row = idx / W;
+    int col = idx % W;
+    int base_row = row * R;
+    int base_col = col * R;
+    int fine_w = W * R;
+    float sum = 0.0f;
+    for (int dy = 0; dy < R; ++dy) {
+        int row_offset = (base_row + dy) * fine_w + base_col;
+        for (int dx = 0; dx < R; ++dx) {
+            sum += src[row_offset + dx];
+        }
+    }
+    dst[idx] = sum / (float)(R * R);
+}
+"""
+
+_RESTRICT_F64_SRC = r"""
+extern "C" __global__
+void restrict_mean_f64(const double* src, double* dst, int H, int W, int R)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = H * W;
+    if (idx >= total) return;
+    int row = idx / W;
+    int col = idx % W;
+    int base_row = row * R;
+    int base_col = col * R;
+    int fine_w = W * R;
+    double sum = 0.0;
+    for (int dy = 0; dy < R; ++dy) {
+        int row_offset = (base_row + dy) * fine_w + base_col;
+        for (int dx = 0; dx < R; ++dx) {
+            sum += src[row_offset + dx];
+        }
+    }
+    dst[idx] = sum / (double)(R * R);
+}
+"""
+
+
+def _get_dense_kernel(kind: str, dtype: cp.dtype) -> cp.RawKernel:
+    key = (kind, dtype)
+    kernel = _DENSE_KERNEL_CACHE.get(key)
+    if kernel is not None:
+        return kernel
+    if kind == "prolong":
+        if dtype == cp.float32:
+            src = _PROLONG_F32_SRC
+            name = "prolong_dense_f32"
+        elif dtype == cp.float64:
+            src = _PROLONG_F64_SRC
+            name = "prolong_dense_f64"
+        elif dtype == cp.uint8:
+            src = _PROLONG_U8_SRC
+            name = "prolong_dense_u8"
+        else:
+            raise TypeError(f"unsupported dtype {dtype} for prolong kernel")
+    elif kind == "restrict_mean":
+        if dtype == cp.float32:
+            src = _RESTRICT_F32_SRC
+            name = "restrict_mean_f32"
+        elif dtype == cp.float64:
+            src = _RESTRICT_F64_SRC
+            name = "restrict_mean_f64"
+        else:
+            raise TypeError(f"unsupported dtype {dtype} for restrict kernel")
+    else:
+        raise ValueError(f"unknown kernel kind '{kind}'")
+    kernel = cp.RawKernel(src, name, options=("--std=c++11",))
+    _DENSE_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
 def _init_condition(W: int, H: int, kind: str = "sharp", amp: float = 1.0) -> cp.ndarray:
     xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
     yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
@@ -91,13 +218,70 @@ def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: fl
 
 def _restrict_mean(u_f: cp.ndarray, R: int) -> cp.ndarray:
     Hf, Wf = u_f.shape
+    if Hf % R or Wf % R:
+        raise ValueError("fine grid dimensions must be divisible by ratio")
     H = Hf // R
     W = Wf // R
-    return u_f.reshape(H, R, W, R).mean(axis=(1, 3))
+    src = cp.ascontiguousarray(u_f)
+    dtype = src.dtype
+    if dtype not in (cp.float32, cp.float64):
+        src = src.astype(cp.float32)
+        dtype = cp.float32
+    dst = cp.empty((H, W), dtype=dtype)
+    kernel = _get_dense_kernel("restrict_mean", dtype)
+    block = (256,)
+    grid = ((H * W + block[0] - 1) // block[0],)
+    kernel(
+        grid,
+        block,
+        (
+            src.ravel(),
+            dst.ravel(),
+            np.int32(H),
+            np.int32(W),
+            np.int32(R),
+        ),
+    )
+    if dst.dtype != u_f.dtype:
+        return dst.astype(u_f.dtype, copy=False)
+    return dst
 
 
 def _prolong_repeat(u_c: cp.ndarray, R: int) -> cp.ndarray:
-    return cp.repeat(cp.repeat(u_c, R, axis=0), R, axis=1)
+    H, W = u_c.shape
+    src = cp.ascontiguousarray(u_c)
+    dtype = src.dtype
+    needs_bool = False
+    if dtype == cp.bool_:
+        src = src.astype(cp.uint8)
+        dtype = cp.uint8
+        needs_bool = True
+    elif dtype not in (cp.float32, cp.float64, cp.uint8):
+        src = src.astype(cp.float32)
+        dtype = cp.float32
+    dst = cp.empty((H * R, W * R), dtype=dtype)
+    kernel = _get_dense_kernel("prolong", dtype)
+    block = (32, 8)
+    grid = (
+        ((W * R) + block[0] - 1) // block[0],
+        ((H * R) + block[1] - 1) // block[1],
+    )
+    kernel(
+        grid,
+        block,
+        (
+            src.ravel(),
+            dst.ravel(),
+            np.int32(H),
+            np.int32(W),
+            np.int32(R),
+        ),
+    )
+    if needs_bool:
+        return dst.astype(cp.bool_, copy=False)
+    if dst.dtype != u_c.dtype:
+        return dst.astype(u_c.dtype, copy=False)
+    return dst
 
 
 def _dilate_vn(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
