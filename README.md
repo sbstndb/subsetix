@@ -1,65 +1,112 @@
-# Subsetix — CUDA interval intersections (1D/2D/3D)
+# Subsetix — CUDA Interval Intersections (1D/2D/3D)
 
-Intersections d'intervalles sur GPU, en CSR par lignes:
-- 1D: une seule ligne.
-- 2D: lignes = y (offsets par y).
-- 3D: lignes aplaties (z,y) avec `row_offsets`, `row_to_y`, `row_to_z`.
+- GPU intersections of 1D intervals arranged per-row (CSR layout) with a linear, two-pass algorithm (count + write) per row.
+- Supports 1D (single row), 2D (rows = y), and 3D (rows = (z,y) flattened via row maps).
 
-Deux passes CUDA (count + write), balayage linéaire par ligne (double pointeur), sorties compactes.
+**Data Layout (CSR)**
+- Inputs per set S: `begin[]`, `end[]`, `row_offsets[]` (size = rows + 1).
+- 3D adds `row_to_y[]`, `row_to_z[]` (size = rows) to recover (y,z) for each row.
+- Outputs (optional): row indices (y or (z,y)), `r_begin[]`, `r_end[]`, `a_idx[]`, `b_idx[]`.
 
-## Schéma de données (CSR)
-- Entrées par ensemble S: `begin[]`, `end[]`, `row_offsets[]` (taille rows+1).
-- 3D ajoute `row_to_y[]`, `row_to_z[]` (taille rows).
-- Résultats (option): indices de ligne (y ou z+y), `r_begin[]`, `r_end[]`, `a_idx[]`, `b_idx[]`.
+**Repository Layout**
+- `src/interval_intersection.cuh`: Public API (classic, workspace, and CUDA Graphs). Start: src/interval_intersection.cuh:1
+- `src/interval_intersection.cu`: Kernels `row_intersection_*` and orchestration (two-pass, Thrust/CUB, Graph capture). Start: src/interval_intersection.cu:1
+- `src/surface_demo.cu`: 2D multi-shape demo (rectangles vs circles). Entry: src/surface_demo.cu:103
+- `src/volume_demo.cu`: 3D multi-shape demo (boxes vs spheres). Entry: src/volume_demo.cu:120
+- `bench/workspace_benchmark.cu`: Benchmarks for classic/workspace/graphs, multi-streams, empty cases, multi-shape sequences, and parallel multi-shape 2D. Start: bench/workspace_benchmark.cu:1
+- `bench/count_multishape.cpp`: Host-only utility to count 2D multi-shape intervals. Start: bench/count_multishape.cpp:1
+- Generators: `src/surface_generator.*` and `src/volume_generator.*` (rect/circle/box/sphere generation, unions, rasterization, VTK writers).
 
-API (device ptrs): voir `src/interval_intersection.cuh`
-- 2D: `findIntervalIntersections(...)` avec offsets par y.
-- 3D: `findVolumeIntersections(...)` avec offsets par ligne et maps y/z.
-- Réutilisation sans `cudaMalloc`: `compute*IntersectionOffsets(...)` + `write*IntersectionsWithOffsets(...)` (buffers `counts/offsets` fournis par l'appelant, `cudaStream_t` optionnel).
-- CUDA Graphs: capturer les deux passes avec préallocation
-  - Offsets: `create{Interval|Volume}IntersectionOffsetsGraph(...)` (requiert `counts`, `offsets`, workspace CUB et, optionnellement, `d_total`).
-  - Écriture: `create{Interval|Volume}IntersectionWriteGraph(...)` (consomme `offsets` + buffers résultats déjà alloués).
-  - Lancement: `launch*Graph(exec, stream)` réutilisable; `destroy*Graph` nettoie. Voir `src/test_intersection.cu` pour le schéma double-graph (compute total → alloc résultats → write).
+**Build**
+- Requirements: CUDA Toolkit (nvcc, Thrust/CUB), CMake ≥ 3.18, GTest.
+- CUDA architectures: configurable via `-DCMAKE_CUDA_ARCHITECTURES=...`; defaults to `75;86;89` if not provided.
 
-## Build rapide
-- Prérequis: CUDA Toolkit (nvcc), Thrust (fourni par CUDA), CMake (>= 3.18), GTest.
-- Arch GPU: `CMAKE_CUDA_ARCHITECTURES` est paramétrable; valeurs par défaut `75;86;89` si non spécifié.
-
-Commandes:
+Commands:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-## Exécutables
-- `build/intersection_test` — tests 1D/2D/3D (GTest).
-- `build/exemple_main` — exemple minimal.
-- `build/surface_demo` — 2D (union/VTK désactivés par défaut, voir constantes en tête de fichier).
-- `build/volume_demo` — 3D (VTK désactivé par défaut, cf. `WRITE_VTK`).
+**Executables**
+- `build/intersection_test` — GTest suite for 2D/3D (classic, workspace, graphs).
+- `build/workspace_benchmark` — device-only timing for multiple modes (2D/3D, streams, graphs, empty, multi-shape).
+- `build/surface_demo` — 2D demo (toggle `RUN_HOST_UNION` and `WRITE_VTK`). See src/surface_demo.cu:107
+- `build/volume_demo` — 3D demo (`WRITE_VTK` off by default). See src/volume_demo.cu:124
+- `build/exemple_main` — minimal example.
 
-## Utilisation minimale (2D/3D)
-- 2D: fournir `a_begin/a_end/a_y_offsets`, `b_begin/b_end/b_y_offsets`, `y_count` identiques.
-- 3D: fournir `*_row_offsets`, `row_to_y`, `row_to_z` (pour A), et `row_count` identiques.
-- Les fonctions allouent les buffers résultats (libérer via `freeIntervalResults`/`freeVolumeIntersectionResults`).
+**API Overview**
+- Classic (simple, allocates outputs internally):
+  - 2D: `findIntervalIntersections(...)` (free with `freeIntervalResults`). Start: src/interval_intersection.cuh:6
+  - 3D: `findVolumeIntersections(...)` (free with `freeVolumeIntersectionResults`). Start: src/interval_intersection.cuh:27
+- Workspace (no internal allocations, reusable):
+  - Step 1 — offsets: `compute*IntersectionOffsets(...)` fills `counts/offsets` and returns `total`. Start: src/interval_intersection.cuh:90
+  - Step 2 — write: `write*IntersectionsWithOffsets(...)` consumes `offsets` into your preallocated outputs. Start: src/interval_intersection.cuh:105
+  - Lower-level `enqueue*` variants accept a CUB workspace (capture-safe). Start: src/interval_intersection.cuh:58, src/interval_intersection.cuh:73
+- CUDA Graphs (two-graph workflow):
+  - Offsets graph: `create{Interval|Volume}IntersectionOffsetsGraph(...)` (needs `counts`, `offsets`, CUB workspace, optional `d_total`). Start: src/interval_intersection.cuh:147
+  - Write graph: `create{Interval|Volume}IntersectionWriteGraph(...)` (after allocating outputs with capacity `total`). Start: src/interval_intersection.cuh:161
+  - Launch with `launch*Graph(...)`; destroy with `destroy*Graph(...)`. Start: src/interval_intersection.cuh:165
 
-Sources utiles:
-- `src/interval_intersection.cu` — kernels + orchestration (2 passes, Thrust scan).
-- `src/surface_generator.*` / `src/volume_generator.*` — générateurs rect/cercle/box/sphere, union, raster, VTK.
-- `src/surface_demo.cu`, `src/volume_demo.cu` — démos + mesures ns/interval.
-
-## Tests et benchmarks
-```bash
-./build/intersection_test
-./build/surface_demo   # ~1M interv./résultat, écrit VTK
-./build/volume_demo    # ~1M interv./résultat, VTK off
+Workspace 2D example (sketch):
+```c++
+// d_a_*/d_b_* on device; y_count identical
+cudaStream_t s; cudaStreamCreate(&s);
+thrust::device_vector<int> counts(y_count), offsets(y_count);
+int total = 0;
+computeIntervalIntersectionOffsets(d_a_begin, d_a_end, d_a_y_offsets, y_count,
+                                   d_b_begin, d_b_end, d_b_y_offsets, y_count,
+                                   counts.data().get(), offsets.data().get(), &total, s);
+ResultBuffers out = allocResults(total); // app-side helper
+writeIntervalIntersectionsWithOffsets(d_a_begin, d_a_end, d_a_y_offsets, y_count,
+                                      d_b_begin, d_b_end, d_b_y_offsets, y_count,
+                                      offsets.data().get(),
+                                      out.y_idx, out.begin, out.end, out.a_idx, out.b_idx, s);
+cudaStreamDestroy(s);
 ```
-Exemple (RTX 1000 Ada, Release):
-- 2D: ~4.9 ns/interval (intersection seule, union/VTK off).
-- 3D: ~1.35 ns/interval (intersection seule).
 
-Notes:
-- La métrique ns/interval est basée sur le nombre d'intersections produites.
-- Adapter les tailles/densités dans les démos (constantes en tête de fichier) pour mesurer à grande échelle.
+CUDA Graphs 2D (two graphs):
+```c++
+// 1) Offsets graph (with CUB workspace and d_total)
+IntervalIntersectionOffsetsGraphConfig ocfg{ /* d_a_*, d_b_*, counts, offsets, temp, d_total, a_y_count */ };
+IntervalIntersectionGraph og; createIntervalIntersectionOffsetsGraph(&og, ocfg);
+launchIntervalIntersectionGraph(og);
+int total=0; cudaMemcpy(&total, d_total, sizeof(int), cudaMemcpyDeviceToHost);
+// 2) Write graph with preallocated outputs (capacity = total)
+IntervalIntersectionWriteGraphConfig wcfg{ /* d_a_*, d_b_*, offsets, outputs*, total */ };
+IntervalIntersectionGraph wg; createIntervalIntersectionWriteGraph(&wg, wcfg);
+// 3) Reuse
+launchIntervalIntersectionGraph(og);
+launchIntervalIntersectionGraph(wg);
+```
 
-## Limitations connues
-- Scénarios avec très peu de lignes simultanées peuvent sous-utiliser le GPU (un thread = une ligne).
+**Benchmarks**
+- Run: `./build/workspace_benchmark`
+- Modes: classic/workspace/graph for 2D/3D; multi-stream; “empty” intersections; multi-dataset sequences; 2D multi-shape parallel (8 pairs, one stream per pair).
+- Device-only timing: allocations and H2D/D2H outside the measured window.
+- Metrics:
+  - ns/interval (inputs) = normalized by |A| + |B| (linear work per row).
+  - ns/interval (outputs) = normalized by produced intersections (used by demos).
+
+**Demos**
+- 2D: `./build/surface_demo` — prints interval counts and “Intersection time (device)” in ns/interval (outputs).
+  - Constants: `intervals_per_row`, `width`, `height`, `RUN_HOST_UNION`, `WRITE_VTK`. See src/surface_demo.cu:103
+- 3D: `./build/volume_demo` — similar for volumes; `WRITE_VTK` off by default. See src/volume_demo.cu:124
+- VTK: enabling VTK output generates large files; keep off for quick runs.
+
+**Tests**
+- Run: `ctest --test-dir build` or `./build/intersection_test`.
+- The suite validates classic/workspace/graphs correctness for basic 2D cases. Start: src/test_intersection.cu:1
+- Note: running requires a working CUDA driver; in restricted environments, device allocations may fail.
+
+**Performance Notes**
+- 2D under-occupancy: one thread per row can under-use the GPU if there are few rows. Batch multiple 2D pairs (multi-stream) to increase occupancy.
+- Empty intersections: benchmarks measure offsets-only (count+scan); write is skipped if `total==0`.
+- Dominant costs: launch/synchronization overheads and, for non-empty scenes, the write kernel; CUB scan is usually minor.
+- Avoid repeated `cudaMalloc`: prefer the workspace/graphs API (preallocate/reuse).
+
+**Roadmap**
+- Active-row compaction (CUB DeviceSelect) for sparse scenes.
+- Atomic fallback (count+write fused) for ultra-sparse cases.
+- Negative tests for Graph configs (null pointers, zero capacities, mismatched rows).
+- CLI flags for benchmarks (select scenarios, number of multi-shape pairs, etc.).
+
