@@ -84,28 +84,52 @@ int main() {
     cudaMemcpy(d_row_to_z, h_row_to_z.data(), row_map_bytes, cudaMemcpyHostToDevice);
 
     printf("Calling library function...\n");
-    int *d_r_z_idx = nullptr;
-    int *d_r_y_idx = nullptr;
-    int *d_r_begin = nullptr;
-    int *d_r_end = nullptr;
-    int *d_a_idx = nullptr;
-    int *d_b_idx = nullptr;
+    int* d_counts = nullptr;
+    int* d_offsets = nullptr;
+    int* d_r_z_idx = nullptr;
+    int* d_r_y_idx = nullptr;
+    int* d_r_begin = nullptr;
+    int* d_r_end = nullptr;
+    int* d_a_idx = nullptr;
+    int* d_b_idx = nullptr;
     int total_intersections = 0;
+
+    if (row_count > 0) {
+        const size_t row_bytes = static_cast<size_t>(row_count) * sizeof(int);
+        cudaMalloc(&d_counts, row_bytes);
+        cudaMalloc(&d_offsets, row_bytes);
+    }
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
 
-    findVolumeIntersections(
-        d_a_begin, d_a_end, total_intervals,
-        d_a_row_offsets, d_row_to_y, d_row_to_z, row_count,
-        d_b_begin, d_b_end, total_intervals,
-        d_b_row_offsets, row_count,
-        &d_r_z_idx, &d_r_y_idx,
-        &d_r_begin, &d_r_end,
-        &d_a_idx, &d_b_idx,
-        &total_intersections);
+    cudaError_t err = computeVolumeIntersectionOffsets(
+        d_a_begin, d_a_end, d_a_row_offsets, row_count,
+        d_b_begin, d_b_end, d_b_row_offsets, row_count,
+        d_counts, d_offsets,
+        &total_intersections,
+        nullptr);
+
+    if (err == cudaSuccess && total_intersections > 0) {
+        const size_t bytes = static_cast<size_t>(total_intersections) * sizeof(int);
+        cudaMalloc(&d_r_z_idx, bytes);
+        cudaMalloc(&d_r_y_idx, bytes);
+        cudaMalloc(&d_r_begin, bytes);
+        cudaMalloc(&d_r_end, bytes);
+        cudaMalloc(&d_a_idx, bytes);
+        cudaMalloc(&d_b_idx, bytes);
+        err = writeVolumeIntersectionsWithOffsets(
+            d_a_begin, d_a_end, d_a_row_offsets, row_count,
+            d_b_begin, d_b_end, d_b_row_offsets, row_count,
+            d_row_to_y, d_row_to_z,
+            d_offsets,
+            d_r_z_idx, d_r_y_idx,
+            d_r_begin, d_r_end,
+            d_a_idx, d_b_idx,
+            nullptr);
+    }
 
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -113,7 +137,11 @@ int main() {
     float milliseconds = 0.0f;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
-    printf("Time taken by findVolumeIntersections: %.5f ms\n", milliseconds);
+    if (err != cudaSuccess) {
+        printf("Intersection failed: %s\n", cudaGetErrorString(err));
+    }
+
+    printf("Time taken by intersection: %.5f ms\n", milliseconds);
     printf("Time taken per interval: %.5f ns\n",
            1000.0f * 1000.0f * milliseconds / total_intervals);
     printf("Total intersections found: %d\n", total_intersections);
@@ -145,7 +173,14 @@ int main() {
     }
 
     printf("Freeing arrays...\n");
-    freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+    if (d_r_z_idx) cudaFree(d_r_z_idx);
+    if (d_r_y_idx) cudaFree(d_r_y_idx);
+    if (d_r_begin) cudaFree(d_r_begin);
+    if (d_r_end) cudaFree(d_r_end);
+    if (d_a_idx) cudaFree(d_a_idx);
+    if (d_b_idx) cudaFree(d_b_idx);
+    if (d_counts) cudaFree(d_counts);
+    if (d_offsets) cudaFree(d_offsets);
     cudaFree(d_a_begin);
     cudaFree(d_a_end);
     cudaFree(d_b_begin);

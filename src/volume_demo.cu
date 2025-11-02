@@ -190,6 +190,8 @@ int main() {
         DeviceVolume d_boxes = copyToDevice(boxes);
         DeviceVolume d_spheres = copyToDevice(spheres);
 
+        int* d_counts = nullptr;
+        int* d_offsets = nullptr;
         int* d_r_z_idx = nullptr;
         int* d_r_y_idx = nullptr;
         int* d_r_begin = nullptr;
@@ -198,21 +200,49 @@ int main() {
         int* d_b_idx = nullptr;
         int total_intersections = 0;
 
+        const int row_count = d_boxes.row_count;
+        if (row_count > 0) {
+            const size_t row_bytes = static_cast<size_t>(row_count) * sizeof(int);
+            CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
+            CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+        }
+
         cudaEvent_t start, stop;
         CUDA_CHECK(cudaEventCreate(&start));
         CUDA_CHECK(cudaEventCreate(&stop));
 
         CUDA_CHECK(cudaEventRecord(start));
 
-        cudaError_t err = findVolumeIntersections(
-            d_boxes.begin, d_boxes.end, d_boxes.interval_count,
-            d_boxes.row_offsets, d_boxes.row_to_y, d_boxes.row_to_z, d_boxes.row_count,
-            d_spheres.begin, d_spheres.end, d_spheres.interval_count,
-            d_spheres.row_offsets, d_spheres.row_count,
-            &d_r_z_idx, &d_r_y_idx,
-            &d_r_begin, &d_r_end,
-            &d_a_idx, &d_b_idx,
-            &total_intersections);
+        cudaError_t err = computeVolumeIntersectionOffsets(
+            d_boxes.begin, d_boxes.end, d_boxes.row_offsets, d_boxes.row_count,
+            d_spheres.begin, d_spheres.end, d_spheres.row_offsets, d_spheres.row_count,
+            d_counts, d_offsets,
+            &total_intersections,
+            nullptr);
+
+        if (err == cudaSuccess && total_intersections > 0) {
+            const size_t bytes = static_cast<size_t>(total_intersections) * sizeof(int);
+            err = CUDA_CHECK(cudaMalloc(&d_r_z_idx, bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_y_idx, bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_begin, bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_end, bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_a_idx, bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_b_idx, bytes));
+            if (err == cudaSuccess) {
+                err = writeVolumeIntersectionsWithOffsets(
+                    d_boxes.begin, d_boxes.end, d_boxes.row_offsets, d_boxes.row_count,
+                    d_spheres.begin, d_spheres.end, d_spheres.row_offsets, d_spheres.row_count,
+                    d_boxes.row_to_y, d_boxes.row_to_z,
+                    d_offsets,
+                    d_r_z_idx,
+                    d_r_y_idx,
+                    d_r_begin,
+                    d_r_end,
+                    d_a_idx,
+                    d_b_idx,
+                    nullptr);
+            }
+        }
 
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
@@ -225,6 +255,14 @@ int main() {
 
         if (err != cudaSuccess) {
             std::cerr << "CUDA intersection failed: " << cudaGetErrorString(err) << "\n";
+            if (d_r_z_idx) CUDA_CHECK(cudaFree(d_r_z_idx));
+            if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
+            if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
+            if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
+            if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
+            if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
+            if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+            if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
             freeDeviceVolume(d_boxes);
             freeDeviceVolume(d_spheres);
             return EXIT_FAILURE;
@@ -275,7 +313,14 @@ int main() {
             std::cout << "  volume_intersection.vtk\n";
         }
 
-        freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+        if (d_r_z_idx) CUDA_CHECK(cudaFree(d_r_z_idx));
+        if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
+        if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
+        if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
+        if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
+        if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
+        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
         freeDeviceVolume(d_boxes);
         freeDeviceVolume(d_spheres);
     } catch (const std::exception& ex) {

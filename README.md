@@ -34,18 +34,16 @@ cmake --build build -j
 - `build/volume_demo` — 3D demo (`WRITE_VTK` off by default). See src/volume_demo.cu:124
 - `build/exemple_main` — minimal example.
 
-**API Overview**
-- Classic (simple, allocates outputs internally):
-  - 2D: `findIntervalIntersections(...)` (free with `freeIntervalResults`). Start: src/interval_intersection.cuh:6
-  - 3D: `findVolumeIntersections(...)` (free with `freeVolumeIntersectionResults`). Start: src/interval_intersection.cuh:27
-- Workspace (no internal allocations, reusable):
-  - Step 1 — offsets: `compute*IntersectionOffsets(...)` fills `counts/offsets` and returns `total`. Start: src/interval_intersection.cuh:90
-  - Step 2 — write: `write*IntersectionsWithOffsets(...)` consumes `offsets` into your preallocated outputs. Start: src/interval_intersection.cuh:105
-  - Lower-level `enqueue*` variants accept a CUB workspace (capture-safe). Start: src/interval_intersection.cuh:58, src/interval_intersection.cuh:73
-- CUDA Graphs (two-graph workflow):
-  - Offsets graph: `create{Interval|Volume}IntersectionOffsetsGraph(...)` (needs `counts`, `offsets`, CUB workspace, optional `d_total`). Start: src/interval_intersection.cuh:147
-  - Write graph: `create{Interval|Volume}IntersectionWriteGraph(...)` (after allocating outputs with capacity `total`). Start: src/interval_intersection.cuh:161
-  - Launch with `launch*Graph(...)`; destroy with `destroy*Graph(...)`. Start: src/interval_intersection.cuh:165
+- **API Overview**
+  - Workspace (no internal allocations):
+    - Step 1 — offsets: `compute*IntersectionOffsets(...)` fills `counts/offsets` and optionally returns `total`. Start: src/interval_intersection.cuh:90
+    - Step 2 — write: `write*IntersectionsWithOffsets(...)` consumes `offsets` into preallocated buffers. Start: src/interval_intersection.cuh:105
+    - Union/Diff follow the same pattern via `compute*UnionOffsets(...)` / `write*UnionWithOffsets(...)` and `compute*DifferenceOffsets(...)` / `write*DifferenceWithOffsets(...)`. Start: src/interval_intersection.cuh:226
+    - Lower-level `enqueue*` variants accept a CUB workspace (capture-safe). Start: src/interval_intersection.cuh:58, src/interval_intersection.cuh:128
+  - CUDA Graphs (two-graph workflow):
+    - Offsets graph: `create{Interval|Volume}IntersectionOffsetsGraph(...)` (needs `counts`, `offsets`, CUB workspace, optional `d_total`). Start: src/interval_intersection.cuh:147
+    - Write graph: `create{Interval|Volume}IntersectionWriteGraph(...)` (after allocating outputs with capacity `total`). Start: src/interval_intersection.cuh:161
+    - Launch with `launch*Graph(...)`; destroy with `destroy*Graph(...)`. Start: src/interval_intersection.cuh:165
 
 Workspace 2D example (sketch):
 ```c++
@@ -109,4 +107,3 @@ launchIntervalIntersectionGraph(wg);
 - Atomic fallback (count+write fused) for ultra-sparse cases.
 - Negative tests for Graph configs (null pointers, zero capacities, mismatched rows).
 - CLI flags for benchmarks (select scenarios, number of multi-shape pairs, etc.).
-

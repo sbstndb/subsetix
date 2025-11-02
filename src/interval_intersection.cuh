@@ -3,58 +3,6 @@
 
 #include <cuda_runtime.h>
 
-cudaError_t findIntervalIntersections(
-    // Inputs
-    const int* d_a_begin,
-    const int* d_a_end,
-    int a_interval_count,
-    const int* d_a_y_offsets,
-    int a_y_count,
-    const int* d_b_begin,
-    const int* d_b_end,
-    int b_interval_count,
-    const int* d_b_y_offsets,
-    int b_y_count,
-    // Outputs
-    int** d_r_y_idx,
-    int** d_r_begin,
-    int** d_r_end,
-    int** d_a_idx,
-    int** d_b_idx,
-    int* total_intersections_count,
-    cudaStream_t stream = nullptr);
-
-cudaError_t findVolumeIntersections(
-    // Inputs for set A
-    const int* d_a_begin,
-    const int* d_a_end,
-    int a_interval_count,
-    const int* d_a_row_offsets,
-    const int* d_a_row_to_y, // may be nullptr -> defaults to row index
-    const int* d_a_row_to_z, // may be nullptr -> defaults to 0
-    int a_row_count,
-    // Inputs for set B
-    const int* d_b_begin,
-    const int* d_b_end,
-    int b_interval_count,
-    const int* d_b_row_offsets,
-    int b_row_count,
-    // Outputs (allocated by the function, caller must free)
-    int** d_r_z_idx,
-    int** d_r_y_idx,
-    int** d_r_begin,
-    int** d_r_end,
-    int** d_a_idx,
-    int** d_b_idx,
-    int* total_intersections_count,
-    cudaStream_t stream = nullptr);
-
-void freeIntervalResults(int* d_r_y_idx,
-                         int* d_r_begin,
-                         int* d_r_end,
-                         int* d_a_idx,
-                         int* d_b_idx);
-
 cudaError_t enqueueIntervalIntersectionOffsets(
     const int* d_a_begin,
     const int* d_a_end,
@@ -117,13 +65,6 @@ cudaError_t writeIntervalIntersectionsWithOffsets(
     int* d_a_idx,
     int* d_b_idx,
     cudaStream_t stream = nullptr);
-
-void freeVolumeIntersectionResults(int* d_r_z_idx,
-                                   int* d_r_y_idx,
-                                   int* d_r_begin,
-                                   int* d_r_end,
-                                   int* d_a_idx,
-                                   int* d_b_idx);
 
 cudaError_t enqueueVolumeIntersectionOffsets(
     const int* d_a_begin,
@@ -192,6 +133,254 @@ cudaError_t writeVolumeIntersectionsWithOffsets(
     int* d_r_end,
     int* d_a_idx,
     int* d_b_idx,
+    cudaStream_t stream = nullptr);
+
+cudaError_t enqueueIntervalUnionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    int* d_counts,
+    int* d_offsets,
+    cudaStream_t stream = nullptr,
+    void* d_temp_storage = nullptr,
+    size_t temp_storage_bytes = 0);
+
+cudaError_t enqueueIntervalUnionWrite(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    const int* d_offsets,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t computeIntervalUnionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    int* d_counts,
+    int* d_offsets,
+    int* total_intervals_count,
+    cudaStream_t stream = nullptr);
+
+cudaError_t writeIntervalUnionWithOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    const int* d_offsets,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t enqueueIntervalDifferenceOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    int* d_counts,
+    int* d_offsets,
+    cudaStream_t stream = nullptr,
+    void* d_temp_storage = nullptr,
+    size_t temp_storage_bytes = 0);
+
+cudaError_t enqueueIntervalDifferenceWrite(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    const int* d_offsets,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t computeIntervalDifferenceOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    int* d_counts,
+    int* d_offsets,
+    int* total_intervals_count,
+    cudaStream_t stream = nullptr);
+
+cudaError_t writeIntervalDifferenceWithOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_y_offsets,
+    int a_y_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_y_offsets,
+    int b_y_count,
+    const int* d_offsets,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t enqueueVolumeUnionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    int* d_counts,
+    int* d_offsets,
+    cudaStream_t stream = nullptr,
+    void* d_temp_storage = nullptr,
+    size_t temp_storage_bytes = 0);
+
+cudaError_t enqueueVolumeUnionWrite(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    const int* d_a_row_to_y,
+    const int* d_a_row_to_z,
+    const int* d_offsets,
+    int* d_r_z_idx,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t computeVolumeUnionOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    int* d_counts,
+    int* d_offsets,
+    int* total_intervals_count,
+    cudaStream_t stream = nullptr);
+
+cudaError_t writeVolumeUnionWithOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    const int* d_a_row_to_y,
+    const int* d_a_row_to_z,
+    const int* d_offsets,
+    int* d_r_z_idx,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t enqueueVolumeDifferenceOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    int* d_counts,
+    int* d_offsets,
+    cudaStream_t stream = nullptr,
+    void* d_temp_storage = nullptr,
+    size_t temp_storage_bytes = 0);
+
+cudaError_t enqueueVolumeDifferenceWrite(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    const int* d_a_row_to_y,
+    const int* d_a_row_to_z,
+    const int* d_offsets,
+    int* d_r_z_idx,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
+    cudaStream_t stream = nullptr);
+
+cudaError_t computeVolumeDifferenceOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    int* d_counts,
+    int* d_offsets,
+    int* total_intervals_count,
+    cudaStream_t stream = nullptr);
+
+cudaError_t writeVolumeDifferenceWithOffsets(
+    const int* d_a_begin,
+    const int* d_a_end,
+    const int* d_a_row_offsets,
+    int a_row_count,
+    const int* d_b_begin,
+    const int* d_b_end,
+    const int* d_b_row_offsets,
+    int b_row_count,
+    const int* d_a_row_to_y,
+    const int* d_a_row_to_z,
+    const int* d_offsets,
+    int* d_r_z_idx,
+    int* d_r_y_idx,
+    int* d_r_begin,
+    int* d_r_end,
     cudaStream_t stream = nullptr);
 
 

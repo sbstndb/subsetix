@@ -275,16 +275,145 @@ void freeResults(ResultBuffers& buffers) {
     buffers = {};
 }
 
-float benchmarkClassic2D(const SurfaceDevice& a,
-                         const SurfaceDevice& b,
-                         int iterations) {
+cudaError_t runClassicIntersection2D(const SurfaceDevice& a,
+                                     const SurfaceDevice& b) {
+    int* d_counts = nullptr;
+    int* d_offsets = nullptr;
     int* d_r_y_idx = nullptr;
     int* d_r_begin = nullptr;
     int* d_r_end = nullptr;
     int* d_a_idx = nullptr;
     int* d_b_idx = nullptr;
-    int total = 0;
 
+    cudaError_t err = cudaSuccess;
+    int total = 0;
+    const int rows = a.row_count;
+    if (rows > 0) {
+        const size_t row_bytes = static_cast<size_t>(rows) * sizeof(int);
+        err = CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+        if (err != cudaSuccess) goto cleanup;
+    }
+    err = computeIntervalIntersectionOffsets(
+        a.begin, a.end, a.offsets, a.row_count,
+        b.begin, b.end, b.offsets, b.row_count,
+        d_counts, d_offsets,
+        &total,
+        nullptr);
+    if (err != cudaSuccess) goto cleanup;
+
+    if (total > 0) {
+        const size_t bytes = static_cast<size_t>(total) * sizeof(int);
+        err = CUDA_CHECK(cudaMalloc(&d_r_y_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_r_begin, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_r_end, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_a_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_b_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+
+        err = writeIntervalIntersectionsWithOffsets(
+            a.begin, a.end, a.offsets, a.row_count,
+            b.begin, b.end, b.offsets, b.row_count,
+            d_offsets,
+            d_r_y_idx,
+            d_r_begin,
+            d_r_end,
+            d_a_idx,
+            d_b_idx,
+            nullptr);
+        if (err != cudaSuccess) goto cleanup;
+    }
+
+cleanup:
+    if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
+    if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
+    if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
+    if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
+    if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
+    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+    if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+    return err;
+}
+
+cudaError_t runClassicIntersection3D(const VolumeDevice& a,
+                                     const VolumeDevice& b) {
+    int* d_counts = nullptr;
+    int* d_offsets = nullptr;
+    int* d_r_z_idx = nullptr;
+    int* d_r_y_idx = nullptr;
+    int* d_r_begin = nullptr;
+    int* d_r_end = nullptr;
+    int* d_a_idx = nullptr;
+    int* d_b_idx = nullptr;
+
+    cudaError_t err = cudaSuccess;
+    int total = 0;
+    const int rows = a.row_count;
+    if (rows > 0) {
+        const size_t row_bytes = static_cast<size_t>(rows) * sizeof(int);
+        err = CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+        if (err != cudaSuccess) goto cleanup;
+    }
+    err = computeVolumeIntersectionOffsets(
+        a.begin, a.end, a.offsets, a.row_count,
+        b.begin, b.end, b.offsets, b.row_count,
+        d_counts, d_offsets,
+        &total,
+        nullptr);
+    if (err != cudaSuccess) goto cleanup;
+
+    if (total > 0) {
+        const size_t bytes = static_cast<size_t>(total) * sizeof(int);
+        err = CUDA_CHECK(cudaMalloc(&d_r_z_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_r_y_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_r_begin, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_r_end, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_a_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+        err = CUDA_CHECK(cudaMalloc(&d_b_idx, bytes));
+        if (err != cudaSuccess) goto cleanup;
+
+        err = writeVolumeIntersectionsWithOffsets(
+            a.begin, a.end, a.offsets, a.row_count,
+            b.begin, b.end, b.offsets, b.row_count,
+            a.row_to_y, a.row_to_z,
+            d_offsets,
+            d_r_z_idx,
+            d_r_y_idx,
+            d_r_begin,
+            d_r_end,
+            d_a_idx,
+            d_b_idx,
+            nullptr);
+        if (err != cudaSuccess) goto cleanup;
+    }
+
+cleanup:
+    if (d_r_z_idx) CUDA_CHECK(cudaFree(d_r_z_idx));
+    if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
+    if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
+    if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
+    if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
+    if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
+    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+    if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+    return err;
+}
+
+float benchmarkClassic2D(const SurfaceDevice& a,
+                         const SurfaceDevice& b,
+                         int iterations) {
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
@@ -292,22 +421,11 @@ float benchmarkClassic2D(const SurfaceDevice& a,
     CUDA_CHECK(cudaEventRecord(start));
 
     for (int i = 0; i < iterations; ++i) {
-        total = 0;
-        cudaError_t err = findIntervalIntersections(
-            a.begin, a.end, a.interval_count,
-            a.offsets, a.row_count,
-            b.begin, b.end, b.interval_count,
-            b.offsets, b.row_count,
-            &d_r_y_idx,
-            &d_r_begin, &d_r_end,
-            &d_a_idx, &d_b_idx,
-            &total);
+        cudaError_t err = runClassicIntersection2D(a, b);
         if (err != cudaSuccess) {
-            printf("findIntervalIntersections failed: %s\n", cudaGetErrorString(err));
+            printf("classic 2D iteration failed: %s\n", cudaGetErrorString(err));
             break;
         }
-        freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
-        d_r_y_idx = d_r_begin = d_r_end = d_a_idx = d_b_idx = nullptr;
     }
 
     CUDA_CHECK(cudaEventRecord(stop));
@@ -686,25 +804,10 @@ float benchmarkClassic2DSequence(
                 continue;
             }
 
-            int* d_r_y_idx = nullptr;
-            int* d_r_begin = nullptr;
-            int* d_r_end = nullptr;
-            int* d_a_idx = nullptr;
-            int* d_b_idx = nullptr;
-            int total = 0;
-
-            cudaError_t err = findIntervalIntersections(
-                a->begin, a->end, a->interval_count,
-                a->offsets, a->row_count,
-                b->begin, b->end, b->interval_count,
-                b->offsets, b->row_count,
-                &d_r_y_idx, &d_r_begin, &d_r_end,
-                &d_a_idx, &d_b_idx,
-                &total);
+            cudaError_t err = runClassicIntersection2D(*a, *b);
             if (err != cudaSuccess) {
-                printf("findIntervalIntersections (sequence 2D) failed: %s\n", cudaGetErrorString(err));
+                printf("classic sequence 2D failed: %s\n", cudaGetErrorString(err));
             }
-            freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
         }
     }
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -991,14 +1094,6 @@ float benchmarkGraph2DSequence(
 float benchmarkClassic3D(const VolumeDevice& a,
                          const VolumeDevice& b,
                          int iterations) {
-    int* d_r_z_idx = nullptr;
-    int* d_r_y_idx = nullptr;
-    int* d_r_begin = nullptr;
-    int* d_r_end = nullptr;
-    int* d_a_idx = nullptr;
-    int* d_b_idx = nullptr;
-    int total = 0;
-
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
@@ -1006,22 +1101,11 @@ float benchmarkClassic3D(const VolumeDevice& a,
     CUDA_CHECK(cudaEventRecord(start));
 
     for (int i = 0; i < iterations; ++i) {
-        total = 0;
-        cudaError_t err = findVolumeIntersections(
-            a.begin, a.end, a.interval_count,
-            a.offsets, a.row_to_y, a.row_to_z, a.row_count,
-            b.begin, b.end, b.interval_count,
-            b.offsets, b.row_count,
-            &d_r_z_idx, &d_r_y_idx,
-            &d_r_begin, &d_r_end,
-            &d_a_idx, &d_b_idx,
-            &total);
+        cudaError_t err = runClassicIntersection3D(a, b);
         if (err != cudaSuccess) {
-            printf("findVolumeIntersections failed: %s\n", cudaGetErrorString(err));
+            printf("classic 3D iteration failed: %s\n", cudaGetErrorString(err));
             break;
         }
-        freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
-        d_r_z_idx = d_r_y_idx = d_r_begin = d_r_end = d_a_idx = d_b_idx = nullptr;
     }
 
     CUDA_CHECK(cudaEventRecord(stop));
@@ -1403,27 +1487,10 @@ float benchmarkClassic3DSequence(
                 continue;
             }
 
-            int* d_r_z_idx = nullptr;
-            int* d_r_y_idx = nullptr;
-            int* d_r_begin = nullptr;
-            int* d_r_end = nullptr;
-            int* d_a_idx = nullptr;
-            int* d_b_idx = nullptr;
-            int total = 0;
-
-            cudaError_t err = findVolumeIntersections(
-                a->begin, a->end, a->interval_count,
-                a->offsets, a->row_to_y, a->row_to_z, a->row_count,
-                b->begin, b->end, b->interval_count,
-                b->offsets, b->row_count,
-                &d_r_z_idx, &d_r_y_idx,
-                &d_r_begin, &d_r_end,
-                &d_a_idx, &d_b_idx,
-                &total);
+            cudaError_t err = runClassicIntersection3D(*a, *b);
             if (err != cudaSuccess) {
-                printf("findVolumeIntersections (sequence 3D) failed: %s\n", cudaGetErrorString(err));
+                printf("classic sequence 3D failed: %s\n", cudaGetErrorString(err));
             }
-            freeVolumeIntersectionResults(d_r_z_idx, d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
         }
     }
     CUDA_CHECK(cudaDeviceSynchronize());

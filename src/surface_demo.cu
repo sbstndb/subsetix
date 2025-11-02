@@ -165,6 +165,8 @@ int main() {
         DeviceSurface d_rectangles = copyToDevice(rectangles);
         DeviceSurface d_circles = copyToDevice(circles);
 
+        int* d_counts = nullptr;
+        int* d_offsets = nullptr;
         int* d_r_y_idx = nullptr;
         int* d_r_begin = nullptr;
         int* d_r_end = nullptr;
@@ -172,20 +174,42 @@ int main() {
         int* d_b_idx = nullptr;
         int total_intersections = 0;
 
+        const size_t row_bytes = static_cast<size_t>(height) * sizeof(int);
+        CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
+        CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+
         cudaEvent_t start, stop;
         CUDA_CHECK(cudaEventCreate(&start));
         CUDA_CHECK(cudaEventCreate(&stop));
         CUDA_CHECK(cudaEventRecord(start));
 
-        cudaError_t err = findIntervalIntersections(
-            d_rectangles.begin, d_rectangles.end, d_rectangles.interval_count,
-            d_rectangles.offsets, height,
-            d_circles.begin, d_circles.end, d_circles.interval_count,
-            d_circles.offsets, height,
-            &d_r_y_idx,
-            &d_r_begin, &d_r_end,
-            &d_a_idx, &d_b_idx,
-            &total_intersections);
+        cudaError_t err = computeIntervalIntersectionOffsets(
+            d_rectangles.begin, d_rectangles.end, d_rectangles.offsets, height,
+            d_circles.begin, d_circles.end, d_circles.offsets, height,
+            d_counts, d_offsets,
+            &total_intersections,
+            nullptr);
+
+        if (err == cudaSuccess && total_intersections > 0) {
+            const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
+            err = CUDA_CHECK(cudaMalloc(&d_r_y_idx, results_bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_begin, results_bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_end, results_bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_a_idx, results_bytes));
+            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_b_idx, results_bytes));
+            if (err == cudaSuccess) {
+                err = writeIntervalIntersectionsWithOffsets(
+                    d_rectangles.begin, d_rectangles.end, d_rectangles.offsets, height,
+                    d_circles.begin, d_circles.end, d_circles.offsets, height,
+                    d_offsets,
+                    d_r_y_idx,
+                    d_r_begin,
+                    d_r_end,
+                    d_a_idx,
+                    d_b_idx,
+                    nullptr);
+            }
+        }
 
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
@@ -197,6 +221,13 @@ int main() {
 
         if (err != cudaSuccess) {
             std::cerr << "CUDA intersection failed: " << cudaGetErrorString(err) << "\n";
+            if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
+            if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
+            if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
+            if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
+            if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
+            if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+            if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
             freeDeviceSurface(d_rectangles);
             freeDeviceSurface(d_circles);
             return EXIT_FAILURE;
@@ -252,7 +283,13 @@ int main() {
             std::cout << "  surface_intersection.vtk\n";
         }
 
-        freeIntervalResults(d_r_y_idx, d_r_begin, d_r_end, d_a_idx, d_b_idx);
+        if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
+        if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
+        if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
+        if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
+        if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
+        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
         freeDeviceSurface(d_rectangles);
         freeDeviceSurface(d_circles);
     } catch (const std::exception& ex) {
