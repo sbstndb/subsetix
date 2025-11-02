@@ -8,6 +8,7 @@
 
 #include "interval_intersection.cuh"
 #include "cuda_utils.cuh"
+#include "surface_chain_builder.cuh"
 #include "surface_generator.hpp"
 
 namespace {
@@ -781,6 +782,53 @@ float benchmarkGraph2D(const SurfaceDevice& a,
     if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
     if (d_total) CUDA_CHECK(cudaFree(d_total));
     CUDA_CHECK(cudaStreamDestroy(graph_stream));
+    return ms / iterations;
+}
+
+float benchmarkSurfaceChainExecutor2D(const SurfaceDevice& a,
+                                      const SurfaceDevice& b,
+                                      int iterations) {
+    subsetix::SurfaceDescriptor a_desc{};
+    a_desc.view.d_begin = a.begin;
+    a_desc.view.d_end = a.end;
+    a_desc.view.d_row_offsets = a.offsets;
+    a_desc.view.row_count = a.row_count;
+    a_desc.interval_count = a.interval_count;
+
+    subsetix::SurfaceDescriptor b_desc{};
+    b_desc.view.d_begin = b.begin;
+    b_desc.view.d_end = b.end;
+    b_desc.view.d_row_offsets = b.offsets;
+    b_desc.view.row_count = b.row_count;
+    b_desc.interval_count = b.interval_count;
+
+    subsetix::SurfaceChainBuilder builder;
+    auto a_handle = builder.add_input(a_desc);
+    auto b_handle = builder.add_input(b_desc);
+    auto union_handle = builder.add_union(a_handle, b_handle);
+    builder.add_difference(union_handle, b_handle);
+
+    subsetix::SurfaceChainRunner runner(builder);
+    CUDA_CHECK(runner.prepare());
+    CUDA_CHECK(runner.run());
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+
+    for (int iter = 0; iter < iterations; ++iter) {
+        CUDA_CHECK(runner.run());
+    }
+
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
     return ms / iterations;
 }
 
@@ -1985,6 +2033,7 @@ int main() {
     float workspace2D = benchmarkWorkspaceStream2D(rect, circ, iterations);
     float multiStream2D = benchmarkWorkspaceMultiStream2D(rect, circ, iterations, stream_count);
     float graph2D = benchmarkGraph2D(rect, circ, iterations);
+    float chainExec2D = benchmarkSurfaceChainExecutor2D(rect, circ, iterations);
     // Empty intersections (2D)
     float classic2DEmpty = benchmarkClassic2D(rectDisjointA, rectDisjointB, iterations);
     float workspace2DEmpty = benchmarkWorkspaceStream2D(rectDisjointA, rectDisjointB, iterations);

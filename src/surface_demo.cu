@@ -1,301 +1,139 @@
 #include <cuda_runtime.h>
-
-#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <iostream>
-#include <utility>
 #include <vector>
 
 #include "cuda_utils.cuh"
-#include "interval_intersection.cuh"
+#include "surface_chain_builder.cuh"
 #include "surface_generator.hpp"
 
-struct DeviceSurface {
-    int* begin = nullptr;
-    int* end = nullptr;
-    int* offsets = nullptr;
-    int interval_count = 0;
-};
-
-DeviceSurface copyToDevice(const SurfaceIntervals& surface) {
-    DeviceSurface device;
-    device.interval_count = surface.intervalCount();
-
-    const size_t interval_bytes = static_cast<size_t>(surface.intervalCount()) * sizeof(int);
-    const size_t offsets_bytes = static_cast<size_t>(surface.y_offsets.size()) * sizeof(int);
-
-    CUDA_CHECK(cudaMalloc(&device.begin, interval_bytes));
-    CUDA_CHECK(cudaMalloc(&device.end, interval_bytes));
-    CUDA_CHECK(cudaMalloc(&device.offsets, offsets_bytes));
-
-    CUDA_CHECK(cudaMemcpy(device.begin, surface.x_begin.data(), interval_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(device.end, surface.x_end.data(), interval_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(device.offsets, surface.y_offsets.data(), offsets_bytes, cudaMemcpyHostToDevice));
-
-    return device;
-}
-
-void freeDeviceSurface(DeviceSurface& device) {
-    if (device.begin) CUDA_CHECK(cudaFree(device.begin));
-    if (device.end) CUDA_CHECK(cudaFree(device.end));
-    if (device.offsets) CUDA_CHECK(cudaFree(device.offsets));
-    device = {};
-}
-
-SurfaceIntervals surfaceFromIntersections(const std::vector<int>& y_idx,
-                                          const std::vector<int>& begin,
-                                          const std::vector<int>& end,
-                                          int width,
-                                          int height) {
-    SurfaceIntervals surface;
-    surface.width = width;
-    surface.height = height;
-    surface.y_offsets.assign(height + 1, 0);
-
-    std::vector<std::vector<std::pair<int, int>>> per_row(height);
-    for (size_t i = 0; i < y_idx.size(); ++i) {
-        int y = y_idx[i];
-        if (y < 0 || y >= height) {
-            continue;
-        }
-        per_row[y].emplace_back(begin[i], end[i]);
-    }
-
-    for (int y = 0; y < height; ++y) {
-        surface.y_offsets[y] = static_cast<int>(surface.x_begin.size());
-        auto& intervals = per_row[y];
-        std::sort(intervals.begin(), intervals.end(),
-                  [](const std::pair<int, int>& lhs, const std::pair<int, int>& rhs) {
-                      return lhs.first < rhs.first;
-                  });
-        for (const auto& interval : intervals) {
-            if (interval.first < interval.second) {
-                surface.x_begin.push_back(interval.first);
-                surface.x_end.push_back(interval.second);
-            }
-        }
-        surface.y_offsets[y + 1] = static_cast<int>(surface.x_begin.size());
-    }
-
-    return surface;
-}
-
-namespace {
-
-int fractionToCoord(int max_value, double fraction) {
-    if (fraction < 0.0) {
-        fraction = 0.0;
-    } else if (fraction > 1.0) {
-        fraction = 1.0;
-    }
-    int value = static_cast<int>(std::round(max_value * fraction));
-    if (value < 0) {
-        value = 0;
-    } else if (value > max_value) {
-        value = max_value;
-    }
-    return value;
-}
-
-} // namespace
-
-int main() {
-    constexpr int intervals_per_row = 1024;
-    constexpr int width = intervals_per_row * 4;
-    constexpr int height = 1024;
-    constexpr bool RUN_HOST_UNION = false;
-    constexpr bool WRITE_VTK = false;
-
-    try {
-        // Build a composite set of five rectangles with varying extents.
-        SurfaceIntervals rectangles = generateRectangle(
-            width, height,
-            fractionToCoord(width, 0.05), fractionToCoord(width, 0.35),
-            fractionToCoord(height, 0.10), fractionToCoord(height, 0.40));
-
-        rectangles = unionSurfaces(rectangles, generateRectangle(
-            width, height,
-            fractionToCoord(width, 0.30), fractionToCoord(width, 0.55),
-            fractionToCoord(height, 0.25), fractionToCoord(height, 0.55)));
-
-        rectangles = unionSurfaces(rectangles, generateRectangle(
-            width, height,
-            fractionToCoord(width, 0.60), fractionToCoord(width, 0.90),
-            fractionToCoord(height, 0.20), fractionToCoord(height, 0.50)));
-
-        rectangles = unionSurfaces(rectangles, generateRectangle(
-            width, height,
-            fractionToCoord(width, 0.15), fractionToCoord(width, 0.40),
-            fractionToCoord(height, 0.55), fractionToCoord(height, 0.85)));
-
-        rectangles = unionSurfaces(rectangles, generateRectangle(
-            width, height,
-            fractionToCoord(width, 0.45), fractionToCoord(width, 0.75),
-            fractionToCoord(height, 0.05), fractionToCoord(height, 0.25)));
-
-        // Build a composite set of five circles scattered across the domain.
-        auto makeCircle = [&](double cx, double cy, double radius_fraction) {
-            int center_x = fractionToCoord(width, cx);
-            int center_y = fractionToCoord(height, cy);
-            int radius = std::max(1, fractionToCoord(width, radius_fraction));
-            return generateCircle(width, height, center_x, center_y, radius);
-        };
-
-        SurfaceIntervals circles = makeCircle(0.20, 0.30, 0.12);
-        circles = unionSurfaces(circles, makeCircle(0.50, 0.20, 0.10));
-        circles = unionSurfaces(circles, makeCircle(0.75, 0.60, 0.14));
-        circles = unionSurfaces(circles, makeCircle(0.35, 0.75, 0.11));
-        circles = unionSurfaces(circles, makeCircle(0.62, 0.48, 0.09));
-
-        std::cout << "Composite rectangles intervals: " << rectangles.intervalCount() << "\n";
-        std::cout << "Composite circles intervals:    " << circles.intervalCount() << "\n";
-
-        [[maybe_unused]] SurfaceIntervals surface_union;
-        [[maybe_unused]] double union_ms = 0.0;
-        [[maybe_unused]] bool have_union = false;
-        if (RUN_HOST_UNION || WRITE_VTK) {
-            auto union_start = std::chrono::high_resolution_clock::now();
-            surface_union = unionSurfaces(rectangles, circles);
-            auto union_end = std::chrono::high_resolution_clock::now();
-            union_ms = std::chrono::duration<double, std::milli>(union_end - union_start).count();
-            have_union = true;
-        }
-
-        DeviceSurface d_rectangles = copyToDevice(rectangles);
-        DeviceSurface d_circles = copyToDevice(circles);
-
-        int* d_counts = nullptr;
+namespace
+{
+    struct DeviceSurface
+    {
+        int* d_begin = nullptr;
+        int* d_end = nullptr;
         int* d_offsets = nullptr;
-        int* d_r_y_idx = nullptr;
-        int* d_r_begin = nullptr;
-        int* d_r_end = nullptr;
-        int* d_a_idx = nullptr;
-        int* d_b_idx = nullptr;
-        int total_intersections = 0;
+        int interval_count = 0;
+        int row_count = 0;
+    };
 
-        const size_t row_bytes = static_cast<size_t>(height) * sizeof(int);
-        CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
-        CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
-
-        cudaEvent_t start, stop;
-        CUDA_CHECK(cudaEventCreate(&start));
-        CUDA_CHECK(cudaEventCreate(&stop));
-        CUDA_CHECK(cudaEventRecord(start));
-
-        cudaError_t err = computeIntervalIntersectionOffsets(
-            d_rectangles.begin, d_rectangles.end, d_rectangles.offsets, height,
-            d_circles.begin, d_circles.end, d_circles.offsets, height,
-            d_counts, d_offsets,
-            &total_intersections,
-            nullptr);
-
-        if (err == cudaSuccess && total_intersections > 0) {
-            const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-            err = CUDA_CHECK(cudaMalloc(&d_r_y_idx, results_bytes));
-            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_begin, results_bytes));
-            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_r_end, results_bytes));
-            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_a_idx, results_bytes));
-            if (err == cudaSuccess) err = CUDA_CHECK(cudaMalloc(&d_b_idx, results_bytes));
-            if (err == cudaSuccess) {
-                err = writeIntervalIntersectionsWithOffsets(
-                    d_rectangles.begin, d_rectangles.end, d_rectangles.offsets, height,
-                    d_circles.begin, d_circles.end, d_circles.offsets, height,
-                    d_offsets,
-                    d_r_y_idx,
-                    d_r_begin,
-                    d_r_end,
-                    d_a_idx,
-                    d_b_idx,
-                    nullptr);
-            }
+    DeviceSurface copy_surface_to_device(const SurfaceIntervals& surface)
+    {
+        DeviceSurface device;
+        device.interval_count = surface.intervalCount();
+        device.row_count = surface.height;
+        if (surface.intervalCount() == 0) {
+            CUDA_CHECK(cudaMalloc(&device.d_offsets, (surface.height + 1) * sizeof(int)));
+            CUDA_CHECK(cudaMemcpy(device.d_offsets,
+                                  surface.y_offsets.data(),
+                                  (surface.height + 1) * sizeof(int),
+                                  cudaMemcpyHostToDevice));
+            return device;
         }
 
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
+        const size_t interval_bytes = static_cast<size_t>(surface.intervalCount()) * sizeof(int);
+        const size_t offsets_bytes = static_cast<size_t>(surface.height + 1) * sizeof(int);
 
-        float milliseconds = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
-        CUDA_CHECK(cudaEventDestroy(start));
-        CUDA_CHECK(cudaEventDestroy(stop));
+        CUDA_CHECK(cudaMalloc(&device.d_begin, interval_bytes));
+        CUDA_CHECK(cudaMalloc(&device.d_end, interval_bytes));
+        CUDA_CHECK(cudaMalloc(&device.d_offsets, offsets_bytes));
 
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA intersection failed: " << cudaGetErrorString(err) << "\n";
-            if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
-            if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
-            if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
-            if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
-            if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
-            if (d_counts) CUDA_CHECK(cudaFree(d_counts));
-            if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-            freeDeviceSurface(d_rectangles);
-            freeDeviceSurface(d_circles);
-            return EXIT_FAILURE;
-        }
-
-        double total_ns = static_cast<double>(milliseconds) * 1.0e6;
-        double per_interval_ns = total_intersections > 0
-                                     ? total_ns / static_cast<double>(total_intersections)
-                                     : 0.0;
-
-        if (RUN_HOST_UNION && have_union) {
-            std::cout << "Union time (host): " << union_ms << " ms\n";
-        }
-        std::cout << "Intersection time (device): " << milliseconds << " ms"
-                  << " (" << total_ns << " ns total, "
-                  << per_interval_ns << " ns/interval)\n";
-        std::cout << "Total intersections: " << total_intersections << "\n";
-
-        if (WRITE_VTK) {
-            std::vector<int> h_r_y_idx(total_intersections);
-            std::vector<int> h_r_begin(total_intersections);
-            std::vector<int> h_r_end(total_intersections);
-
-            if (total_intersections > 0) {
-                const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-                CUDA_CHECK(cudaMemcpy(h_r_y_idx.data(), d_r_y_idx, results_bytes, cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_r_begin.data(), d_r_begin, results_bytes, cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_r_end.data(), d_r_end, results_bytes, cudaMemcpyDeviceToHost));
-            }
-
-            SurfaceIntervals surface_intersection = surfaceFromIntersections(
-                h_r_y_idx, h_r_begin, h_r_end, width, height);
-
-            auto rect_mask = rasterizeToMask(rectangles);
-            auto circle_mask = rasterizeToMask(circles);
-            std::vector<int> union_mask = have_union ? rasterizeToMask(surface_union)
-                                                     : std::vector<int>(static_cast<size_t>(width) * height, 0);
-            auto intersection_mask = rasterizeToMask(surface_intersection);
-
-            writeStructuredPoints("surface_rectangles.vtk", width, height, rect_mask);
-            writeStructuredPoints("surface_circles.vtk", width, height, circle_mask);
-            if (have_union) {
-                writeStructuredPoints("surface_union.vtk", width, height, union_mask);
-            }
-            writeStructuredPoints("surface_intersection.vtk", width, height, intersection_mask);
-
-            std::cout << "Generated 2D VTK surfaces:\n";
-            std::cout << "  surface_rectangles.vtk\n";
-            std::cout << "  surface_circles.vtk\n";
-            if (have_union) {
-                std::cout << "  surface_union.vtk\n";
-            }
-            std::cout << "  surface_intersection.vtk\n";
-        }
-
-        if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));
-        if (d_r_begin) CUDA_CHECK(cudaFree(d_r_begin));
-        if (d_r_end) CUDA_CHECK(cudaFree(d_r_end));
-        if (d_a_idx) CUDA_CHECK(cudaFree(d_a_idx));
-        if (d_b_idx) CUDA_CHECK(cudaFree(d_b_idx));
-        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
-        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-        freeDeviceSurface(d_rectangles);
-        freeDeviceSurface(d_circles);
-    } catch (const std::exception& ex) {
-        std::cerr << "Exception: " << ex.what() << "\n";
-        return EXIT_FAILURE;
+        CUDA_CHECK(cudaMemcpy(device.d_begin,
+                              surface.x_begin.data(),
+                              interval_bytes,
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(device.d_end,
+                              surface.x_end.data(),
+                              interval_bytes,
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(device.d_offsets,
+                              surface.y_offsets.data(),
+                              offsets_bytes,
+                              cudaMemcpyHostToDevice));
+        return device;
     }
 
-    return EXIT_SUCCESS;
+    void free_device_surface(DeviceSurface& surface)
+    {
+        if (surface.d_begin) CUDA_CHECK(cudaFree(surface.d_begin));
+        if (surface.d_end) CUDA_CHECK(cudaFree(surface.d_end));
+        if (surface.d_offsets) CUDA_CHECK(cudaFree(surface.d_offsets));
+        surface = {};
+    }
+}
+
+int main()
+{
+    const int width = 2048;
+    const int height = 1024;
+
+    auto rectangles = generateRectangle(width, height, width / 20, width / 3, height / 10, height / 3);
+    rectangles = unionSurfaces(rectangles, generateRectangle(width, height, width / 4, width / 2, height / 4, height / 2));
+    rectangles = unionSurfaces(rectangles, generateRectangle(width, height, width / 2, width * 3 / 4, height / 3, height * 2 / 3));
+
+    auto makeCircle = [&](double cx, double cy, double radius_fraction) {
+        int center_x = static_cast<int>(cx * width);
+        int center_y = static_cast<int>(cy * height);
+        int radius = std::max(1, static_cast<int>(radius_fraction * width));
+        return generateCircle(width, height, center_x, center_y, radius);
+    };
+
+    auto circles = makeCircle(0.25, 0.35, 0.10);
+    circles = unionSurfaces(circles, makeCircle(0.60, 0.45, 0.12));
+    circles = unionSurfaces(circles, makeCircle(0.40, 0.70, 0.08));
+
+    std::cout << "Rectangles intervals: " << rectangles.intervalCount() << "\n";
+    std::cout << "Circles intervals:    " << circles.intervalCount() << "\n";
+
+    DeviceSurface d_rectangles = copy_surface_to_device(rectangles);
+    DeviceSurface d_circles = copy_surface_to_device(circles);
+
+    subsetix::SurfaceDescriptor rect_desc{};
+    rect_desc.view.d_begin = d_rectangles.d_begin;
+    rect_desc.view.d_end = d_rectangles.d_end;
+    rect_desc.view.d_row_offsets = d_rectangles.d_offsets;
+    rect_desc.view.row_count = height;
+    rect_desc.interval_count = d_rectangles.interval_count;
+
+    subsetix::SurfaceDescriptor circle_desc{};
+    circle_desc.view.d_begin = d_circles.d_begin;
+    circle_desc.view.d_end = d_circles.d_end;
+    circle_desc.view.d_row_offsets = d_circles.d_offsets;
+    circle_desc.view.row_count = height;
+    circle_desc.interval_count = d_circles.interval_count;
+
+    subsetix::SurfaceChainBuilder builder;
+    auto rect_handle = builder.add_input(rect_desc);
+    auto circle_handle = builder.add_input(circle_desc);
+    auto union_handle = builder.add_union(rect_handle, circle_handle);
+    builder.add_difference(union_handle, circle_handle);
+
+    subsetix::SurfaceChainRunner runner(builder);
+    CUDA_CHECK(runner.prepare());
+
+    auto run_start = std::chrono::high_resolution_clock::now();
+    CUDA_CHECK(runner.run());
+    auto run_end = std::chrono::high_resolution_clock::now();
+
+    const auto& result = runner.result();
+    std::cout << "Difference total:  " << result.total << "\n";
+    std::cout << "Surface chain executor time (ms): "
+              << std::chrono::duration<double, std::milli>(run_end - run_start).count() << "\n";
+
+    if (result.total > 0) {
+        std::vector<int> h_y(result.total);
+        std::vector<int> h_begin(result.total);
+        std::vector<int> h_end(result.total);
+        CUDA_CHECK(cudaMemcpy(h_y.data(), result.d_y_idx, result.total * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_begin.data(), result.d_begin, result.total * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_end.data(), result.d_end, result.total * sizeof(int), cudaMemcpyDeviceToHost));
+
+        std::cout << "First difference interval: y=" << h_y[0]
+                  << " [" << h_begin[0] << ", " << h_end[0] << ")\n";
+    }
+
+    free_device_surface(d_rectangles);
+    free_device_surface(d_circles);
+    return 0;
 }

@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include <cuda_runtime.h>
+#include <cub/device/device_scan.cuh>
 
 #include "interval_intersection.cuh"
 #include "cuda_utils.cuh"
@@ -92,25 +93,76 @@ int main() {
     int* d_r_end = nullptr;
     int* d_a_idx = nullptr;
     int* d_b_idx = nullptr;
+    void* d_scan_temp = nullptr;
+    size_t scan_temp_bytes = 0;
+    int* d_total = nullptr;
+    VolumeIntersectionGraph offsets_graph{};
+    VolumeIntersectionGraph write_graph{};
+    cudaStream_t stream = nullptr;
     int total_intersections = 0;
 
+    cudaStreamCreate(&stream);
+
+    cudaError_t err = cudaSuccess;
     if (row_count > 0) {
         const size_t row_bytes = static_cast<size_t>(row_count) * sizeof(int);
         cudaMalloc(&d_counts, row_bytes);
         cudaMalloc(&d_offsets, row_bytes);
+
+        cudaError_t scan_status = cub::DeviceScan::ExclusiveSum(
+            nullptr,
+            scan_temp_bytes,
+            d_counts,
+            d_offsets,
+            row_count,
+            stream);
+        if (scan_status != cudaSuccess) {
+            printf("ExclusiveSum size query failed: %s\n", cudaGetErrorString(scan_status));
+            err = scan_status;
+        } else if (scan_temp_bytes > 0) {
+            cudaMalloc(&d_scan_temp, scan_temp_bytes);
+        }
+        if (err == cudaSuccess) {
+            cudaMalloc(&d_total, sizeof(int));
+        }
     }
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    cudaEventRecord(start);
 
-    cudaError_t err = computeVolumeIntersectionOffsets(
-        d_a_begin, d_a_end, d_a_row_offsets, row_count,
-        d_b_begin, d_b_end, d_b_row_offsets, row_count,
-        d_counts, d_offsets,
-        &total_intersections,
-        nullptr);
+    if (err == cudaSuccess) {
+        VolumeIntersectionOffsetsGraphConfig offsets_cfg{};
+        offsets_cfg.d_a_begin = d_a_begin;
+        offsets_cfg.d_a_end = d_a_end;
+        offsets_cfg.d_a_row_offsets = d_a_row_offsets;
+        offsets_cfg.a_row_count = row_count;
+        offsets_cfg.d_b_begin = d_b_begin;
+        offsets_cfg.d_b_end = d_b_end;
+        offsets_cfg.d_b_row_offsets = d_b_row_offsets;
+        offsets_cfg.b_row_count = row_count;
+        offsets_cfg.d_counts = d_counts;
+        offsets_cfg.d_offsets = d_offsets;
+        offsets_cfg.d_scan_temp_storage = d_scan_temp;
+        offsets_cfg.scan_temp_storage_bytes = scan_temp_bytes;
+        offsets_cfg.d_total = d_total;
+
+        err = createVolumeIntersectionOffsetsGraph(&offsets_graph, offsets_cfg, stream);
+        if (err != cudaSuccess) {
+            printf("createVolumeIntersectionOffsetsGraph failed: %s\n", cudaGetErrorString(err));
+        } else {
+            cudaEventRecord(start, stream);
+            err = launchVolumeIntersectionGraph(offsets_graph, stream);
+            if (err != cudaSuccess) {
+                printf("launchVolumeIntersectionGraph (offsets) failed: %s\n", cudaGetErrorString(err));
+            } else {
+                cudaStreamSynchronize(stream);
+                if (row_count > 0) {
+                    cudaMemcpy(&total_intersections, d_total, sizeof(int), cudaMemcpyDeviceToHost);
+                }
+            }
+        }
+    }
 
     if (err == cudaSuccess && total_intersections > 0) {
         const size_t bytes = static_cast<size_t>(total_intersections) * sizeof(int);
@@ -120,22 +172,45 @@ int main() {
         cudaMalloc(&d_r_end, bytes);
         cudaMalloc(&d_a_idx, bytes);
         cudaMalloc(&d_b_idx, bytes);
-        err = writeVolumeIntersectionsWithOffsets(
-            d_a_begin, d_a_end, d_a_row_offsets, row_count,
-            d_b_begin, d_b_end, d_b_row_offsets, row_count,
-            d_row_to_y, d_row_to_z,
-            d_offsets,
-            d_r_z_idx, d_r_y_idx,
-            d_r_begin, d_r_end,
-            d_a_idx, d_b_idx,
-            nullptr);
+
+        VolumeIntersectionWriteGraphConfig write_cfg{};
+        write_cfg.d_a_begin = d_a_begin;
+        write_cfg.d_a_end = d_a_end;
+        write_cfg.d_a_row_offsets = d_a_row_offsets;
+        write_cfg.a_row_count = row_count;
+        write_cfg.d_a_row_to_y = d_row_to_y;
+        write_cfg.d_a_row_to_z = d_row_to_z;
+        write_cfg.d_b_begin = d_b_begin;
+        write_cfg.d_b_end = d_b_end;
+        write_cfg.d_b_row_offsets = d_b_row_offsets;
+        write_cfg.b_row_count = row_count;
+        write_cfg.d_offsets = d_offsets;
+        write_cfg.d_r_z_idx = d_r_z_idx;
+        write_cfg.d_r_y_idx = d_r_y_idx;
+        write_cfg.d_r_begin = d_r_begin;
+        write_cfg.d_r_end = d_r_end;
+        write_cfg.d_a_idx = d_a_idx;
+        write_cfg.d_b_idx = d_b_idx;
+        write_cfg.total_capacity = total_intersections;
+
+        err = createVolumeIntersectionWriteGraph(&write_graph, write_cfg, stream);
+        if (err != cudaSuccess) {
+            printf("createVolumeIntersectionWriteGraph failed: %s\n", cudaGetErrorString(err));
+        } else {
+            err = launchVolumeIntersectionGraph(write_graph, stream);
+            if (err != cudaSuccess) {
+                printf("launchVolumeIntersectionGraph (write) failed: %s\n", cudaGetErrorString(err));
+            }
+        }
     }
 
-    cudaEventRecord(stop);
+    cudaEventRecord(stop, stream);
     cudaEventSynchronize(stop);
 
     float milliseconds = 0.0f;
-    cudaEventElapsedTime(&milliseconds, start, stop);
+    if (err == cudaSuccess) {
+        cudaEventElapsedTime(&milliseconds, start, stop);
+    }
 
     if (err != cudaSuccess) {
         printf("Intersection failed: %s\n", cudaGetErrorString(err));
@@ -146,7 +221,7 @@ int main() {
            1000.0f * 1000.0f * milliseconds / total_intervals);
     printf("Total intersections found: %d\n", total_intersections);
 
-    if (total_intersections > 0) {
+    if (err == cudaSuccess && total_intersections > 0) {
         printf("Copying results Device -> Host...\n");
         std::vector<int> h_r_z_idx(total_intersections);
         std::vector<int> h_r_y_idx(total_intersections);
@@ -171,6 +246,14 @@ int main() {
                    i, h_r_z_idx[i], h_r_y_idx[i], h_a_idx[i], h_b_idx[i], h_r_begin[i], h_r_end[i]);
         }
     }
+
+    destroyVolumeIntersectionGraph(&write_graph);
+    destroyVolumeIntersectionGraph(&offsets_graph);
+    if (d_scan_temp) cudaFree(d_scan_temp);
+    if (d_total) cudaFree(d_total);
+    if (stream) cudaStreamDestroy(stream);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     printf("Freeing arrays...\n");
     if (d_r_z_idx) cudaFree(d_r_z_idx);

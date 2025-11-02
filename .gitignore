@@ -23,6 +23,9 @@ compile_commands.json
 *.exe
 *.pdb
 
+## Python artifacts
+__pycache__/
+
 ## Logs and outputs
 *.log
 *.out

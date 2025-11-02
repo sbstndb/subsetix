@@ -8,6 +8,8 @@
 #include <cub/device/device_scan.cuh>
 
 #include "interval_intersection.cuh"
+#include "operation_chain.cuh"
+#include "surface_chain_executor.cuh"
 #include "cuda_utils.cuh"
 
 struct SurfaceHost {
@@ -73,6 +75,277 @@ void freeDeviceSurface(DeviceSurfaceForTest& surface) {
     surface = {};
 }
 
+class SurfaceOperationChainTest : public ::testing::Test {
+protected:
+    static SurfaceHost makeSurface(int rows, int base) {
+        std::vector<std::vector<std::pair<int, int>>> intervals(rows);
+        for (int y = 0; y < rows; ++y) {
+            intervals[y].push_back({base + y, base + y + 1});
+        }
+        return buildSurface(rows, intervals);
+    }
+};
+
+TEST_F(SurfaceOperationChainTest, LinearSequenceBuildsSuccessfully)
+{
+    constexpr int rows = 2;
+    SurfaceHost host_a = makeSurface(rows, 0);
+    SurfaceHost host_b = makeSurface(rows, 10);
+    SurfaceHost host_c = makeSurface(rows, 20);
+
+    DeviceSurfaceForTest dev_a = copySurfaceToDevice(host_a);
+    DeviceSurfaceForTest dev_b = copySurfaceToDevice(host_b);
+    DeviceSurfaceForTest dev_c = copySurfaceToDevice(host_c);
+
+    subsetix::SurfaceOperationChain chain;
+    auto a = chain.add_input({dev_a.begin, dev_a.end, dev_a.offsets, rows});
+    auto b = chain.add_input({dev_b.begin, dev_b.end, dev_b.offsets, rows});
+    auto diff = chain.add_operation(subsetix::SurfaceOpType::Difference, a, b);
+    auto c = chain.add_input({dev_c.begin, dev_c.end, dev_c.offsets, rows});
+    auto final_node = chain.add_operation(subsetix::SurfaceOpType::Intersection, diff, c);
+
+    EXPECT_EQ(chain.row_count(), rows);
+    ASSERT_EQ(chain.nodes().size(), 2u);
+    EXPECT_TRUE(diff.is_node);
+    EXPECT_TRUE(final_node.is_node);
+    EXPECT_EQ(chain.nodes()[0].type, subsetix::SurfaceOpType::Difference);
+    EXPECT_EQ(chain.nodes()[1].type, subsetix::SurfaceOpType::Intersection);
+
+    freeDeviceSurface(dev_a);
+    freeDeviceSurface(dev_b);
+    freeDeviceSurface(dev_c);
+}
+
+TEST_F(SurfaceOperationChainTest, ExecutorPreparesLinearPlan)
+{
+    constexpr int rows = 3;
+    SurfaceHost host_a = makeSurface(rows, 0);
+    SurfaceHost host_b = makeSurface(rows, 5);
+    SurfaceHost host_c = makeSurface(rows, 10);
+
+    DeviceSurfaceForTest dev_a = copySurfaceToDevice(host_a);
+    DeviceSurfaceForTest dev_b = copySurfaceToDevice(host_b);
+    DeviceSurfaceForTest dev_c = copySurfaceToDevice(host_c);
+
+    subsetix::SurfaceOperationChain chain;
+    auto a = chain.add_input({dev_a.begin, dev_a.end, dev_a.offsets, rows});
+    auto b = chain.add_input({dev_b.begin, dev_b.end, dev_b.offsets, rows});
+    auto u = chain.add_operation(subsetix::SurfaceOpType::Union, a, b);
+    auto c = chain.add_input({dev_c.begin, dev_c.end, dev_c.offsets, rows});
+    chain.add_operation(subsetix::SurfaceOpType::Difference, u, c);
+
+    subsetix::SurfaceChainExecutor exec;
+    cudaError_t err = exec.prepare(chain);
+    EXPECT_EQ(err, cudaSuccess);
+    EXPECT_EQ(exec.row_count(), rows);
+
+    const auto& plan = exec.plan();
+    ASSERT_EQ(plan.size(), 2u);
+    EXPECT_EQ(plan[0].type, subsetix::SurfaceOpType::Union);
+    EXPECT_FALSE(plan[0].lhs.from_node);
+    EXPECT_EQ(plan[0].lhs.index, a.index);
+    EXPECT_FALSE(plan[0].rhs.from_node);
+    EXPECT_EQ(plan[0].rhs.index, b.index);
+
+    EXPECT_EQ(plan[1].type, subsetix::SurfaceOpType::Difference);
+    EXPECT_TRUE(plan[1].lhs.from_node);
+    EXPECT_EQ(plan[1].lhs.index, 0);
+    EXPECT_FALSE(plan[1].rhs.from_node);
+    EXPECT_EQ(plan[1].rhs.index, c.index);
+
+    err = exec.plan_resources();
+    EXPECT_EQ(err, cudaSuccess);
+    EXPECT_EQ(exec.counts_stride(), static_cast<size_t>(rows));
+    EXPECT_EQ(exec.offsets_stride(), static_cast<size_t>(rows) + 1);
+    EXPECT_EQ(exec.nodes_requiring_materialization(), 2u);
+    const auto& flags = exec.materialization_flags();
+    ASSERT_EQ(flags.size(), 2u);
+    EXPECT_TRUE(flags[0]);
+    EXPECT_TRUE(flags[1]);
+
+    freeDeviceSurface(dev_a);
+    freeDeviceSurface(dev_b);
+    freeDeviceSurface(dev_c);
+}
+
+TEST_F(SurfaceOperationChainTest, RejectsMismatchedRowCounts)
+{
+    SurfaceHost host_a = makeSurface(2, 0);
+    SurfaceHost host_b = makeSurface(3, 5);
+
+    DeviceSurfaceForTest dev_a = copySurfaceToDevice(host_a);
+    DeviceSurfaceForTest dev_b = copySurfaceToDevice(host_b);
+
+    subsetix::SurfaceOperationChain chain;
+    auto a = chain.add_input({dev_a.begin, dev_a.end, dev_a.offsets, 2});
+    EXPECT_EQ(chain.row_count(), 2);
+
+    EXPECT_THROW(chain.add_input({dev_b.begin, dev_b.end, dev_b.offsets, 3}), std::invalid_argument);
+
+    subsetix::SurfaceHandle invalid_node{0, true};
+    EXPECT_THROW(chain.add_operation(subsetix::SurfaceOpType::Union, a, invalid_node), std::invalid_argument);
+
+    freeDeviceSurface(dev_a);
+    freeDeviceSurface(dev_b);
+}
+
+TEST(SurfaceChainExecutorTest, EmptyChainRejected)
+{
+    subsetix::SurfaceOperationChain chain;
+    subsetix::SurfaceChainExecutor exec;
+    cudaError_t err = exec.prepare(chain);
+    EXPECT_EQ(err, cudaErrorInvalidValue);
+    EXPECT_TRUE(exec.plan().empty());
+}
+
+TEST(SurfaceChainExecutorTest, PlanResourcesAllowsZeroRows)
+{
+    int* d_dummy = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_dummy, sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_dummy, 0, sizeof(int)), cudaSuccess);
+
+    subsetix::SurfaceOperationChain chain;
+    auto a = chain.add_input({d_dummy, d_dummy, d_dummy, 0});
+    auto b = chain.add_input({d_dummy, d_dummy, d_dummy, 0});
+    chain.add_operation(subsetix::SurfaceOpType::Union, a, b);
+
+    subsetix::SurfaceChainExecutor exec;
+    ASSERT_EQ(exec.prepare(chain), cudaSuccess);
+    EXPECT_EQ(exec.row_count(), 0);
+    ASSERT_EQ(exec.plan().size(), 1u);
+    ASSERT_EQ(exec.plan_resources(), cudaSuccess);
+
+    EXPECT_EQ(exec.counts_stride(), 1u);
+    EXPECT_EQ(exec.offsets_stride(), 1u);
+    EXPECT_EQ(exec.nodes_requiring_materialization(), 1u);
+
+    CUDA_CHECK(cudaFree(d_dummy));
+}
+
+TEST(SurfaceChainExecutorTest, OffsetsGraphEvaluatesChain)
+{
+    constexpr int rows = 1;
+    SurfaceHost host_a = buildSurface(rows, {{{0, 4}}});
+    SurfaceHost host_b = buildSurface(rows, {{{4, 6}}});
+    SurfaceHost host_c = buildSurface(rows, {{{1, 3}}});
+
+    DeviceSurfaceForTest dev_a = copySurfaceToDevice(host_a);
+    DeviceSurfaceForTest dev_b = copySurfaceToDevice(host_b);
+    DeviceSurfaceForTest dev_c = copySurfaceToDevice(host_c);
+
+    subsetix::SurfaceOperationChain chain;
+    auto a = chain.add_input({dev_a.begin, dev_a.end, dev_a.offsets, rows});
+    auto b = chain.add_input({dev_b.begin, dev_b.end, dev_b.offsets, rows});
+    auto c = chain.add_input({dev_c.begin, dev_c.end, dev_c.offsets, rows});
+    auto u = chain.add_operation(subsetix::SurfaceOpType::Union, a, b);
+    chain.add_operation(subsetix::SurfaceOpType::Difference, u, c);
+
+    subsetix::SurfaceChainExecutor exec;
+    ASSERT_EQ(exec.prepare(chain), cudaSuccess);
+    ASSERT_EQ(exec.plan_resources(), cudaSuccess);
+
+    const size_t node_count = exec.node_count();
+    ASSERT_EQ(node_count, 2u);
+
+    int* d_counts = nullptr;
+    int* d_offsets = nullptr;
+    int* d_totals = nullptr;
+    void* d_scan_temp = nullptr;
+    size_t counts_elements = exec.counts_stride() * node_count;
+    size_t offsets_elements = exec.offsets_stride() * node_count;
+
+    CUDA_CHECK(cudaMalloc(&d_counts, counts_elements * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_offsets, offsets_elements * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_totals, node_count * sizeof(int)));
+
+    size_t scan_temp_bytes = 0;
+    if (exec.row_count() > 0) {
+        int* tmp = nullptr;
+        CUDA_CHECK(cudaMalloc(&tmp, exec.row_count() * sizeof(int)));
+        cub::DeviceScan::ExclusiveSum(nullptr, scan_temp_bytes, tmp, tmp, exec.row_count());
+        CUDA_CHECK(cudaFree(tmp));
+    }
+    if (scan_temp_bytes > 0) {
+        CUDA_CHECK(cudaMalloc(&d_scan_temp, scan_temp_bytes));
+    }
+
+    subsetix::SurfaceWorkspaceView workspace{};
+    workspace.d_counts = d_counts;
+    workspace.d_offsets = d_offsets;
+    workspace.counts_stride = exec.counts_stride();
+    workspace.offsets_stride = exec.offsets_stride();
+    workspace.d_scan_temp = d_scan_temp;
+    workspace.scan_temp_bytes = scan_temp_bytes;
+    workspace.d_totals = d_totals;
+
+    const size_t union_capacity = static_cast<size_t>(host_a.interval_count() + host_b.interval_count());
+    int* d_union_begin = nullptr;
+    int* d_union_end = nullptr;
+    int* d_union_y = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_union_begin, union_capacity * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_union_end, union_capacity * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_union_y, union_capacity * sizeof(int)));
+
+    std::vector<subsetix::SurfaceArenaSlice> slices(node_count);
+    slices[0] = {d_union_begin, d_union_end, d_union_y, nullptr, nullptr, nullptr, union_capacity};
+    slices[1] = {};
+
+    subsetix::SurfaceArenaView arena{ slices.data(), slices.size() };
+
+    subsetix::SurfaceChainGraph offsets_graph;
+    ASSERT_EQ(exec.capture_offsets_graph(workspace, arena, &offsets_graph), cudaSuccess);
+    ASSERT_EQ(subsetix::launch_surface_chain_graph(offsets_graph), cudaSuccess);
+    ASSERT_EQ(CUDA_CHECK(cudaStreamSynchronize(offsets_graph.stream ? offsets_graph.stream : 0)), cudaSuccess);
+
+    std::vector<int> totals(node_count, -1);
+    CUDA_CHECK(cudaMemcpy(totals.data(), d_totals, node_count * sizeof(int), cudaMemcpyDeviceToHost));
+    EXPECT_EQ(totals[0], 1);
+    EXPECT_EQ(totals[1], 2);
+
+    const size_t diff_capacity = static_cast<size_t>(totals[1]);
+    int* d_diff_begin = nullptr;
+    int* d_diff_end = nullptr;
+    int* d_diff_y = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_diff_begin, diff_capacity * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_diff_end, diff_capacity * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_diff_y, diff_capacity * sizeof(int)));
+    slices[1] = {d_diff_begin, d_diff_end, d_diff_y, nullptr, nullptr, nullptr, diff_capacity};
+
+    subsetix::SurfaceArenaView write_arena{ slices.data(), slices.size() };
+
+    subsetix::SurfaceChainGraph write_graph;
+    ASSERT_EQ(exec.capture_write_graph(workspace, write_arena, &write_graph), cudaSuccess);
+    ASSERT_EQ(subsetix::launch_surface_chain_graph(write_graph), cudaSuccess);
+    ASSERT_EQ(CUDA_CHECK(cudaStreamSynchronize(write_graph.stream ? write_graph.stream : 0)), cudaSuccess);
+
+    std::vector<int> diff_begin(diff_capacity);
+    std::vector<int> diff_end(diff_capacity);
+    CUDA_CHECK(cudaMemcpy(diff_begin.data(), d_diff_begin, diff_capacity * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(diff_end.data(), d_diff_end, diff_capacity * sizeof(int), cudaMemcpyDeviceToHost));
+    EXPECT_EQ(diff_begin[0], 0);
+    EXPECT_EQ(diff_end[0], 1);
+    EXPECT_EQ(diff_begin[1], 3);
+    EXPECT_EQ(diff_end[1], 6);
+
+    subsetix::destroy_surface_chain_graph(&write_graph);
+    subsetix::destroy_surface_chain_graph(&offsets_graph);
+
+    CUDA_CHECK(cudaFree(d_union_begin));
+    CUDA_CHECK(cudaFree(d_union_end));
+    CUDA_CHECK(cudaFree(d_union_y));
+    CUDA_CHECK(cudaFree(d_diff_begin));
+    CUDA_CHECK(cudaFree(d_diff_end));
+    CUDA_CHECK(cudaFree(d_diff_y));
+    if (d_scan_temp) CUDA_CHECK(cudaFree(d_scan_temp));
+    CUDA_CHECK(cudaFree(d_counts));
+    CUDA_CHECK(cudaFree(d_offsets));
+    CUDA_CHECK(cudaFree(d_totals));
+
+    freeDeviceSurface(dev_a);
+    freeDeviceSurface(dev_b);
+    freeDeviceSurface(dev_c);
+}
+
 struct DeviceGraphResults {
     int* z_idx = nullptr;
     int* y_idx = nullptr;
@@ -133,99 +406,179 @@ std::vector<SurfaceIntersectionResult> runSurfaceIntersections(const SurfaceHost
     DeviceSurfaceForTest d_a = copySurfaceToDevice(a);
     DeviceSurfaceForTest d_b = copySurfaceToDevice(b);
 
+    const int row_count = a.y_count;
+
     int* d_counts = nullptr;
     int* d_offsets = nullptr;
-    const int row_count = a.y_count;
-    if (row_count > 0) {
-        const size_t row_bytes = static_cast<size_t>(row_count) * sizeof(int);
-        CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
-        CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
-    }
+    void* d_scan_temp = nullptr;
+    size_t scan_temp_bytes = 0;
+    int* d_total = nullptr;
+    DeviceGraphResults d_results{};
 
-    int total_intersections = 0;
-    cudaError_t err = computeIntervalIntersectionOffsets(
-        d_a.begin, d_a.end, d_a.offsets, a.y_count,
-        d_b.begin, d_b.end, d_b.offsets, b.y_count,
-        d_counts, d_offsets,
-        &total_intersections,
-        stream);
-
-    if (err != cudaSuccess) {
-        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
-        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-        freeDeviceSurface(d_a);
-        freeDeviceSurface(d_b);
-        ADD_FAILURE() << "computeIntervalIntersectionOffsets failed: " << cudaGetErrorString(err);
-        return {};
-    }
+    IntervalIntersectionGraph offsets_graph{};
+    IntervalIntersectionGraph write_graph{};
+    IntervalIntersectionOffsetsGraphConfig cfg{};
 
     std::vector<SurfaceIntersectionResult> host_results;
+    cudaError_t err = cudaSuccess;
+    int total_intersections = 0;
 
-    int* d_r_y_idx = nullptr;
-    int* d_r_begin = nullptr;
-    int* d_r_end = nullptr;
-    int* d_a_idx = nullptr;
-    int* d_b_idx = nullptr;
-
-    if (total_intersections > 0) {
-        const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-        CUDA_CHECK(cudaMalloc(&d_r_y_idx, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_r_begin, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_r_end, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_a_idx, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_b_idx, results_bytes));
-
-        err = writeIntervalIntersectionsWithOffsets(
-            d_a.begin, d_a.end, d_a.offsets, a.y_count,
-            d_b.begin, d_b.end, d_b.offsets, b.y_count,
-            d_offsets,
-            d_r_y_idx,
-            d_r_begin,
-            d_r_end,
-            d_a_idx,
-            d_b_idx,
-            stream);
-
+    if (row_count > 0) {
+        const size_t row_bytes = static_cast<size_t>(row_count) * sizeof(int);
+        err = CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
         if (err != cudaSuccess) {
-            CUDA_CHECK(cudaFree(d_r_y_idx));
-            CUDA_CHECK(cudaFree(d_r_begin));
-            CUDA_CHECK(cudaFree(d_r_end));
-            CUDA_CHECK(cudaFree(d_a_idx));
-            CUDA_CHECK(cudaFree(d_b_idx));
-            if (d_counts) CUDA_CHECK(cudaFree(d_counts));
-            if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-            freeDeviceSurface(d_a);
-            freeDeviceSurface(d_b);
-            ADD_FAILURE() << "writeIntervalIntersectionsWithOffsets failed: " << cudaGetErrorString(err);
-            return {};
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+        if (err != cudaSuccess) {
+            goto cleanup;
         }
 
-        host_results.resize(total_intersections);
-        std::vector<int> h_r_y_idx(total_intersections);
-        std::vector<int> h_r_begin(total_intersections);
-        std::vector<int> h_r_end(total_intersections);
-        std::vector<int> h_a_idx(total_intersections);
-        std::vector<int> h_b_idx(total_intersections);
-        const size_t bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-        CUDA_CHECK(cudaMemcpy(h_r_y_idx.data(), d_r_y_idx, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_r_begin.data(), d_r_begin, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_r_end.data(), d_r_end, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_a_idx.data(), d_a_idx, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_b_idx.data(), d_b_idx, bytes, cudaMemcpyDeviceToHost));
-
-        for (int i = 0; i < total_intersections; ++i) {
-            host_results[i] = {h_r_y_idx[i], h_r_begin[i], h_r_end[i], h_a_idx[i], h_b_idx[i]};
+        err = cub::DeviceScan::ExclusiveSum(
+            nullptr,
+            scan_temp_bytes,
+            d_counts,
+            d_offsets,
+            row_count,
+            stream ? stream : nullptr);
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        if (scan_temp_bytes > 0) {
+            err = CUDA_CHECK(cudaMalloc(&d_scan_temp, scan_temp_bytes));
+            if (err != cudaSuccess) {
+                goto cleanup;
+            }
         }
 
-        CUDA_CHECK(cudaFree(d_r_y_idx));
-        CUDA_CHECK(cudaFree(d_r_begin));
-        CUDA_CHECK(cudaFree(d_r_end));
-        CUDA_CHECK(cudaFree(d_a_idx));
-        CUDA_CHECK(cudaFree(d_b_idx));
+        err = CUDA_CHECK(cudaMalloc(&d_total, sizeof(int)));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
     }
 
-    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+    cfg.d_a_begin = d_a.begin;
+    cfg.d_a_end = d_a.end;
+    cfg.d_a_y_offsets = d_a.offsets;
+    cfg.a_y_count = a.y_count;
+    cfg.d_b_begin = d_b.begin;
+    cfg.d_b_end = d_b.end;
+    cfg.d_b_y_offsets = d_b.offsets;
+    cfg.b_y_count = b.y_count;
+    cfg.d_counts = d_counts;
+    cfg.d_offsets = d_offsets;
+    cfg.d_scan_temp_storage = d_scan_temp;
+    cfg.scan_temp_storage_bytes = scan_temp_bytes;
+    cfg.d_total = d_total;
+
+    err = createIntervalIntersectionOffsetsGraph(&offsets_graph, cfg, stream);
+    if (err != cudaSuccess) {
+        ADD_FAILURE() << "createIntervalIntersectionOffsetsGraph failed: " << cudaGetErrorString(err);
+        goto cleanup;
+    }
+
+    err = launchIntervalIntersectionGraph(offsets_graph, stream);
+    if (err != cudaSuccess) {
+        ADD_FAILURE() << "launchIntervalIntersectionGraph (offsets) failed: " << cudaGetErrorString(err);
+        goto cleanup;
+    }
+
+    if (row_count > 0) {
+        cudaStream_t offsets_stream = stream ? stream : offsets_graph.stream;
+        err = cudaStreamSynchronize(offsets_stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "cudaStreamSynchronize (offsets) failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        err = CUDA_CHECK(cudaMemcpy(&total_intersections, d_total, sizeof(int), cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+    }
+
+    if (total_intersections > 0) {
+        d_results = allocDeviceResults(total_intersections, false);
+
+        IntervalIntersectionWriteGraphConfig cfg{};
+        cfg.d_a_begin = d_a.begin;
+        cfg.d_a_end = d_a.end;
+        cfg.d_a_y_offsets = d_a.offsets;
+        cfg.a_y_count = a.y_count;
+        cfg.d_b_begin = d_b.begin;
+        cfg.d_b_end = d_b.end;
+        cfg.d_b_y_offsets = d_b.offsets;
+        cfg.b_y_count = b.y_count;
+        cfg.d_offsets = d_offsets;
+        cfg.d_r_y_idx = d_results.y_idx;
+        cfg.d_r_begin = d_results.begin;
+        cfg.d_r_end = d_results.end;
+        cfg.d_a_idx = d_results.a_idx;
+        cfg.d_b_idx = d_results.b_idx;
+        cfg.total_capacity = total_intersections;
+
+        err = createIntervalIntersectionWriteGraph(&write_graph, cfg, stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "createIntervalIntersectionWriteGraph failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        err = launchIntervalIntersectionGraph(write_graph, stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "launchIntervalIntersectionGraph (write) failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        cudaStream_t write_stream = stream ? stream : write_graph.stream;
+        err = cudaStreamSynchronize(write_stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "cudaStreamSynchronize (write) failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
+        std::vector<int> h_y(total_intersections);
+        std::vector<int> h_begin(total_intersections);
+        std::vector<int> h_end(total_intersections);
+        std::vector<int> h_a(total_intersections);
+        std::vector<int> h_b(total_intersections);
+
+        err = CUDA_CHECK(cudaMemcpy(h_y.data(), d_results.y_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_begin.data(), d_results.begin, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_end.data(), d_results.end, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_a.data(), d_results.a_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_b.data(), d_results.b_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+
+        host_results.reserve(static_cast<size_t>(total_intersections));
+        for (int i = 0; i < total_intersections; ++i) {
+            host_results.push_back({h_y[i], h_begin[i], h_end[i], h_a[i], h_b[i]});
+        }
+    }
+
+cleanup:
+    destroyIntervalIntersectionGraph(&write_graph);
+    destroyIntervalIntersectionGraph(&offsets_graph);
+
+    freeDeviceResults(d_results);
+    if (d_total) CUDA_CHECK(cudaFree(d_total));
+    if (d_scan_temp) CUDA_CHECK(cudaFree(d_scan_temp));
     if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
     freeDeviceSurface(d_a);
     freeDeviceSurface(d_b);
 
@@ -1510,104 +1863,185 @@ std::vector<IntersectionResult> runVolumeIntersections(const VolumeHost& a,
     DeviceVolume d_b = copyToDevice(b, false);
 
     const int rows = a.row_count();
+
     int* d_counts = nullptr;
     int* d_offsets = nullptr;
-    if (rows > 0) {
-        const size_t row_bytes = static_cast<size_t>(rows) * sizeof(int);
-        CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
-        CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
-    }
+    void* d_scan_temp = nullptr;
+    size_t scan_temp_bytes = 0;
+    int* d_total = nullptr;
+    DeviceGraphResults d_results{};
 
-    int total_intersections = 0;
-    cudaError_t err = computeVolumeIntersectionOffsets(
-        d_a.begin, d_a.end, d_a.row_offsets, a.row_count(),
-        d_b.begin, d_b.end, d_b.row_offsets, b.row_count(),
-        d_counts, d_offsets,
-        &total_intersections,
-        stream);
-
-    if (err != cudaSuccess) {
-        if (d_counts) CUDA_CHECK(cudaFree(d_counts));
-        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-        freeDeviceVolume(d_a);
-        freeDeviceVolume(d_b);
-        ADD_FAILURE() << "computeVolumeIntersectionOffsets failed: " << cudaGetErrorString(err);
-        return {};
-    }
+    VolumeIntersectionGraph offsets_graph{};
+    VolumeIntersectionGraph write_graph{};
+    VolumeIntersectionOffsetsGraphConfig offsets_cfg{};
+    VolumeIntersectionWriteGraphConfig write_cfg{};
 
     std::vector<IntersectionResult> host_results;
-    int* d_r_z_idx = nullptr;
-    int* d_r_y_idx = nullptr;
-    int* d_r_begin = nullptr;
-    int* d_r_end = nullptr;
-    int* d_a_idx = nullptr;
-    int* d_b_idx = nullptr;
+    cudaError_t err = cudaSuccess;
+    int total_intersections = 0;
 
-    if (total_intersections > 0) {
-        const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-        CUDA_CHECK(cudaMalloc(&d_r_z_idx, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_r_y_idx, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_r_begin, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_r_end, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_a_idx, results_bytes));
-        CUDA_CHECK(cudaMalloc(&d_b_idx, results_bytes));
-
-        err = writeVolumeIntersectionsWithOffsets(
-            d_a.begin, d_a.end, d_a.row_offsets, a.row_count(),
-            d_b.begin, d_b.end, d_b.row_offsets, b.row_count(),
-            d_a.row_to_y, d_a.row_to_z,
-            d_offsets,
-            d_r_z_idx,
-            d_r_y_idx,
-            d_r_begin,
-            d_r_end,
-            d_a_idx,
-            d_b_idx,
-            stream);
-
+    if (rows > 0) {
+        const size_t row_bytes = static_cast<size_t>(rows) * sizeof(int);
+        err = CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
         if (err != cudaSuccess) {
-            CUDA_CHECK(cudaFree(d_r_z_idx));
-            CUDA_CHECK(cudaFree(d_r_y_idx));
-            CUDA_CHECK(cudaFree(d_r_begin));
-            CUDA_CHECK(cudaFree(d_r_end));
-            CUDA_CHECK(cudaFree(d_a_idx));
-            CUDA_CHECK(cudaFree(d_b_idx));
-            if (d_counts) CUDA_CHECK(cudaFree(d_counts));
-            if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-            freeDeviceVolume(d_a);
-            freeDeviceVolume(d_b);
-            ADD_FAILURE() << "writeVolumeIntersectionsWithOffsets failed: " << cudaGetErrorString(err);
-            return {};
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+        if (err != cudaSuccess) {
+            goto cleanup;
         }
 
-        host_results.resize(total_intersections);
+        err = cub::DeviceScan::ExclusiveSum(
+            nullptr,
+            scan_temp_bytes,
+            d_counts,
+            d_offsets,
+            rows,
+            stream ? stream : nullptr);
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        if (scan_temp_bytes > 0) {
+            err = CUDA_CHECK(cudaMalloc(&d_scan_temp, scan_temp_bytes));
+            if (err != cudaSuccess) {
+                goto cleanup;
+            }
+        }
+
+        err = CUDA_CHECK(cudaMalloc(&d_total, sizeof(int)));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+    }
+
+    offsets_cfg.d_a_begin = d_a.begin;
+    offsets_cfg.d_a_end = d_a.end;
+    offsets_cfg.d_a_row_offsets = d_a.row_offsets;
+    offsets_cfg.a_row_count = a.row_count();
+    offsets_cfg.d_b_begin = d_b.begin;
+    offsets_cfg.d_b_end = d_b.end;
+    offsets_cfg.d_b_row_offsets = d_b.row_offsets;
+    offsets_cfg.b_row_count = b.row_count();
+    offsets_cfg.d_counts = d_counts;
+    offsets_cfg.d_offsets = d_offsets;
+    offsets_cfg.d_scan_temp_storage = d_scan_temp;
+    offsets_cfg.scan_temp_storage_bytes = scan_temp_bytes;
+    offsets_cfg.d_total = d_total;
+
+    err = createVolumeIntersectionOffsetsGraph(&offsets_graph, offsets_cfg, stream);
+    if (err != cudaSuccess) {
+        ADD_FAILURE() << "createVolumeIntersectionOffsetsGraph failed: " << cudaGetErrorString(err);
+        goto cleanup;
+    }
+
+    err = launchVolumeIntersectionGraph(offsets_graph, stream);
+    if (err != cudaSuccess) {
+        ADD_FAILURE() << "launchVolumeIntersectionGraph (offsets) failed: " << cudaGetErrorString(err);
+        goto cleanup;
+    }
+    if (rows > 0) {
+        cudaStream_t offsets_stream = stream ? stream : offsets_graph.stream;
+        err = cudaStreamSynchronize(offsets_stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "cudaStreamSynchronize (offsets) failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        err = CUDA_CHECK(cudaMemcpy(&total_intersections, d_total, sizeof(int), cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+    }
+
+    if (total_intersections > 0) {
+        d_results = allocDeviceResults(total_intersections, true);
+
+        write_cfg.d_a_begin = d_a.begin;
+        write_cfg.d_a_end = d_a.end;
+        write_cfg.d_a_row_offsets = d_a.row_offsets;
+        write_cfg.a_row_count = a.row_count();
+        write_cfg.d_a_row_to_y = d_a.row_to_y;
+        write_cfg.d_a_row_to_z = d_a.row_to_z;
+        write_cfg.d_b_begin = d_b.begin;
+        write_cfg.d_b_end = d_b.end;
+        write_cfg.d_b_row_offsets = d_b.row_offsets;
+        write_cfg.b_row_count = b.row_count();
+        write_cfg.d_offsets = d_offsets;
+        write_cfg.d_r_z_idx = d_results.z_idx;
+        write_cfg.d_r_y_idx = d_results.y_idx;
+        write_cfg.d_r_begin = d_results.begin;
+        write_cfg.d_r_end = d_results.end;
+        write_cfg.d_a_idx = d_results.a_idx;
+        write_cfg.d_b_idx = d_results.b_idx;
+        write_cfg.total_capacity = total_intersections;
+
+        err = createVolumeIntersectionWriteGraph(&write_graph, write_cfg, stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "createVolumeIntersectionWriteGraph failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        err = launchVolumeIntersectionGraph(write_graph, stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "launchVolumeIntersectionGraph (write) failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        cudaStream_t write_stream = stream ? stream : write_graph.stream;
+        err = cudaStreamSynchronize(write_stream);
+        if (err != cudaSuccess) {
+            ADD_FAILURE() << "cudaStreamSynchronize (write) failed: " << cudaGetErrorString(err);
+            goto cleanup;
+        }
+
+        const size_t results_bytes = static_cast<size_t>(total_intersections) * sizeof(int);
         std::vector<int> h_z(total_intersections);
         std::vector<int> h_y(total_intersections);
         std::vector<int> h_begin(total_intersections);
         std::vector<int> h_end(total_intersections);
-        std::vector<int> h_a_idx(total_intersections);
-        std::vector<int> h_b_idx(total_intersections);
-        const size_t bytes = static_cast<size_t>(total_intersections) * sizeof(int);
-        CUDA_CHECK(cudaMemcpy(h_z.data(), d_r_z_idx, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_y.data(), d_r_y_idx, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_begin.data(), d_r_begin, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_end.data(), d_r_end, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_a_idx.data(), d_a_idx, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_b_idx.data(), d_b_idx, bytes, cudaMemcpyDeviceToHost));
-        for (int i = 0; i < total_intersections; ++i) {
-            host_results[i] = {h_z[i], h_y[i], h_begin[i], h_end[i], h_a_idx[i], h_b_idx[i]};
+        std::vector<int> h_a(total_intersections);
+        std::vector<int> h_b(total_intersections);
+
+        err = CUDA_CHECK(cudaMemcpy(h_z.data(), d_results.z_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_y.data(), d_results.y_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_begin.data(), d_results.begin, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_end.data(), d_results.end, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_a.data(), d_results.a_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
+        }
+        err = CUDA_CHECK(cudaMemcpy(h_b.data(), d_results.b_idx, results_bytes, cudaMemcpyDeviceToHost));
+        if (err != cudaSuccess) {
+            goto cleanup;
         }
 
-        CUDA_CHECK(cudaFree(d_r_z_idx));
-        CUDA_CHECK(cudaFree(d_r_y_idx));
-        CUDA_CHECK(cudaFree(d_r_begin));
-        CUDA_CHECK(cudaFree(d_r_end));
-        CUDA_CHECK(cudaFree(d_a_idx));
-        CUDA_CHECK(cudaFree(d_b_idx));
+        host_results.reserve(static_cast<size_t>(total_intersections));
+        for (int i = 0; i < total_intersections; ++i) {
+            host_results.push_back({h_z[i], h_y[i], h_begin[i], h_end[i], h_a[i], h_b[i]});
+        }
     }
 
-    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
+cleanup:
+    destroyVolumeIntersectionGraph(&write_graph);
+    destroyVolumeIntersectionGraph(&offsets_graph);
+
+    freeDeviceResults(d_results);
+    if (d_total) CUDA_CHECK(cudaFree(d_total));
+    if (d_scan_temp) CUDA_CHECK(cudaFree(d_scan_temp));
     if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
+    if (d_counts) CUDA_CHECK(cudaFree(d_counts));
     freeDeviceVolume(d_a);
     freeDeviceVolume(d_b);
     return host_results;
@@ -2388,20 +2822,56 @@ TEST(VolumeIntersectionTest, WorkspaceSimpleOverlapNoRowMaps) {
     const int rows = a.row_count();
     int* d_counts = nullptr;
     int* d_offsets = nullptr;
+    void* d_scan_temp = nullptr;
+    size_t scan_temp_bytes = 0;
+    int* d_total = nullptr;
+    VolumeIntersectionGraph offsets_graph{};
+    VolumeIntersectionGraph write_graph{};
+
     if (rows > 0) {
         const size_t row_bytes = static_cast<size_t>(rows) * sizeof(int);
         CUDA_CHECK(cudaMalloc(&d_counts, row_bytes));
         CUDA_CHECK(cudaMalloc(&d_offsets, row_bytes));
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            nullptr,
+            scan_temp_bytes,
+            d_counts,
+            d_offsets,
+            rows,
+            stream));
+        if (scan_temp_bytes == 0) {
+            scan_temp_bytes = sizeof(int);
+        }
+        CUDA_CHECK(cudaMalloc(&d_scan_temp, scan_temp_bytes));
+        CUDA_CHECK(cudaMalloc(&d_total, sizeof(int)));
     }
 
-    int total = 0;
-    cudaError_t err = computeVolumeIntersectionOffsets(
-        d_a.begin, d_a.end, d_a.row_offsets, rows,
-        d_b.begin, d_b.end, d_b.row_offsets, rows,
-        d_counts, d_offsets,
-        &total,
-        stream);
+    VolumeIntersectionOffsetsGraphConfig offsets_cfg{};
+    offsets_cfg.d_a_begin = d_a.begin;
+    offsets_cfg.d_a_end = d_a.end;
+    offsets_cfg.d_a_row_offsets = d_a.row_offsets;
+    offsets_cfg.a_row_count = rows;
+    offsets_cfg.d_b_begin = d_b.begin;
+    offsets_cfg.d_b_end = d_b.end;
+    offsets_cfg.d_b_row_offsets = d_b.row_offsets;
+    offsets_cfg.b_row_count = rows;
+    offsets_cfg.d_counts = d_counts;
+    offsets_cfg.d_offsets = d_offsets;
+    offsets_cfg.d_scan_temp_storage = d_scan_temp;
+    offsets_cfg.scan_temp_storage_bytes = scan_temp_bytes;
+    offsets_cfg.d_total = d_total;
+
+    cudaError_t err = createVolumeIntersectionOffsetsGraph(&offsets_graph, offsets_cfg, stream);
     ASSERT_EQ(err, cudaSuccess);
+    err = launchVolumeIntersectionGraph(offsets_graph, stream);
+    ASSERT_EQ(err, cudaSuccess);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    int total = 0;
+    if (rows > 0) {
+        CUDA_CHECK(cudaMemcpy(&total, d_total, sizeof(int), cudaMemcpyDeviceToHost));
+    }
     ASSERT_EQ(total, 1);
 
     int* d_r_y_idx = nullptr;
@@ -2410,40 +2880,60 @@ TEST(VolumeIntersectionTest, WorkspaceSimpleOverlapNoRowMaps) {
     int* d_a_idx = nullptr;
     int* d_b_idx = nullptr;
 
-    const size_t bytes = static_cast<size_t>(total) * sizeof(int);
-    CUDA_CHECK(cudaMalloc(&d_r_y_idx, bytes));
-    CUDA_CHECK(cudaMalloc(&d_r_begin, bytes));
-    CUDA_CHECK(cudaMalloc(&d_r_end, bytes));
-    CUDA_CHECK(cudaMalloc(&d_a_idx, bytes));
-    CUDA_CHECK(cudaMalloc(&d_b_idx, bytes));
+    if (total > 0) {
+        const size_t bytes = static_cast<size_t>(total) * sizeof(int);
+        CUDA_CHECK(cudaMalloc(&d_r_y_idx, bytes));
+        CUDA_CHECK(cudaMalloc(&d_r_begin, bytes));
+        CUDA_CHECK(cudaMalloc(&d_r_end, bytes));
+        CUDA_CHECK(cudaMalloc(&d_a_idx, bytes));
+        CUDA_CHECK(cudaMalloc(&d_b_idx, bytes));
 
-    err = writeVolumeIntersectionsWithOffsets(
-        d_a.begin, d_a.end, d_a.row_offsets, rows,
-        d_b.begin, d_b.end, d_b.row_offsets, rows,
-        /*d_a_row_to_y*/ nullptr, /*d_a_row_to_z*/ nullptr,
-        d_offsets,
-        /*d_r_z_idx*/ nullptr,
-        d_r_y_idx,
-        d_r_begin,
-        d_r_end,
-        d_a_idx,
-        d_b_idx,
-        stream);
-    ASSERT_EQ(err, cudaSuccess);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+        VolumeIntersectionWriteGraphConfig write_cfg{};
+        write_cfg.d_a_begin = d_a.begin;
+        write_cfg.d_a_end = d_a.end;
+        write_cfg.d_a_row_offsets = d_a.row_offsets;
+        write_cfg.a_row_count = rows;
+        write_cfg.d_a_row_to_y = nullptr;
+        write_cfg.d_a_row_to_z = nullptr;
+        write_cfg.d_b_begin = d_b.begin;
+        write_cfg.d_b_end = d_b.end;
+        write_cfg.d_b_row_offsets = d_b.row_offsets;
+        write_cfg.b_row_count = rows;
+        write_cfg.d_offsets = d_offsets;
+        write_cfg.d_r_z_idx = nullptr;
+        write_cfg.d_r_y_idx = d_r_y_idx;
+        write_cfg.d_r_begin = d_r_begin;
+        write_cfg.d_r_end = d_r_end;
+        write_cfg.d_a_idx = d_a_idx;
+        write_cfg.d_b_idx = d_b_idx;
+        write_cfg.total_capacity = total;
+
+        err = createVolumeIntersectionWriteGraph(&write_graph, write_cfg, stream);
+        ASSERT_EQ(err, cudaSuccess);
+        err = launchVolumeIntersectionGraph(write_graph, stream);
+        ASSERT_EQ(err, cudaSuccess);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
 
     int h_y = -1, h_beg = -1, h_end = -1, h_ai = -1, h_bi = -1;
-    CUDA_CHECK(cudaMemcpy(&h_y, d_r_y_idx, bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_beg, d_r_begin, bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_end, d_r_end, bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_ai, d_a_idx, bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_bi, d_b_idx, bytes, cudaMemcpyDeviceToHost));
+    if (total > 0) {
+        const size_t bytes = static_cast<size_t>(total) * sizeof(int);
+        CUDA_CHECK(cudaMemcpy(&h_y, d_r_y_idx, bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_beg, d_r_begin, bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_end, d_r_end, bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_ai, d_a_idx, bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_bi, d_b_idx, bytes, cudaMemcpyDeviceToHost));
+    }
     EXPECT_EQ(h_y, 0);
     EXPECT_EQ(h_beg, 2);
     EXPECT_EQ(h_end, 4);
     EXPECT_EQ(h_ai, 0);
     EXPECT_EQ(h_bi, 0);
 
+    destroyVolumeIntersectionGraph(&write_graph);
+    destroyVolumeIntersectionGraph(&offsets_graph);
+    if (d_total) CUDA_CHECK(cudaFree(d_total));
+    if (d_scan_temp) CUDA_CHECK(cudaFree(d_scan_temp));
     if (d_counts) CUDA_CHECK(cudaFree(d_counts));
     if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
     if (d_r_y_idx) CUDA_CHECK(cudaFree(d_r_y_idx));

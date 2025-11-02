@@ -15,7 +15,11 @@ find_package(GTest REQUIRED)
 
 
 # Ajoute l'exécutable
-add_library(interval_intersection src/interval_intersection.cu)
+add_library(interval_intersection
+    src/interval_intersection.cu
+    src/operation_chain.cu
+    src/surface_chain_executor.cu
+    src/surface_chain_builder.cu)
 target_include_directories(interval_intersection PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(interval_intersection PUBLIC CUDA::cudart)
 
