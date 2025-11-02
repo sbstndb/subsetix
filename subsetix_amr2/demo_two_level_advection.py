@@ -128,7 +128,7 @@ def create_argparser() -> argparse.ArgumentParser:
         choices=["von_neumann", "moore"],
         help="Neighborhood used for grading dilation",
     )
-    ap.add_argument("--velocity", type=float, nargs=2, default=[0.6, 0.2], metavar=("a", "b"))
+    ap.add_argument("--velocity", type=float, nargs=2, default=[0.6, 0.6], metavar=("a", "b"))
     ap.add_argument("--cfl", type=float, default=0.9, help="Courant number based on fine spacing")
     ap.add_argument("--bc", type=str, default="clamp", choices=["clamp", "wrap"], help="Boundary condition")
     ap.add_argument(
