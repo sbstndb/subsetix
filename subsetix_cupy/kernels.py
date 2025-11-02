@@ -5,7 +5,7 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Any, Dict, Tuple
 
-_CACHE: Dict[int, Tuple[Any, Any]] = {}
+_CACHE: Dict[int, Tuple[Any, Any, Any, Any, Any]] = {}
 
 
 _COUNT_SRC = dedent(
@@ -257,5 +257,103 @@ def get_kernels(cp_module):
     write_kernel = cp_module.RawKernel(
         _WRITE_SRC, "write_segments", options=("--std=c++11",)
     )
-    _CACHE[key] = (count_kernel, write_kernel)
+    merge_count_kernel = cp_module.RawKernel(
+        _MERGE_COUNT_SRC, "count_merged_segments", options=("--std=c++11",)
+    )
+    merge_write_kernel = cp_module.RawKernel(
+        _MERGE_WRITE_SRC, "write_merged_segments", options=("--std=c++11",)
+    )
+    _CACHE[key] = (count_kernel, write_kernel, None, merge_count_kernel, merge_write_kernel)
     return _CACHE[key]
+
+
+_MERGE_COUNT_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void count_merged_segments(const int* begin,
+                               const int* end,
+                               const int* row_offsets,
+                               int row_count,
+                               int* counts)
+    {
+        int row = blockDim.x * blockIdx.x + threadIdx.x;
+        if (row >= row_count) return;
+
+        int start = row_offsets[row];
+        int stop  = row_offsets[row + 1];
+
+        if (start >= stop) {
+            counts[row] = 0;
+            return;
+        }
+
+        int active_begin = begin[start];
+        int active_end   = end[start];
+        int local_count = 1;
+
+        for (int idx = start + 1; idx < stop; ++idx) {
+            int seg_begin = begin[idx];
+            int seg_end   = end[idx];
+            if (seg_begin <= active_end) {
+                if (seg_end > active_end) {
+                    active_end = seg_end;
+                }
+            } else {
+                ++local_count;
+                active_begin = seg_begin;
+                active_end   = seg_end;
+            }
+        }
+
+        counts[row] = local_count;
+    }
+    """
+)
+
+
+_MERGE_WRITE_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void write_merged_segments(const int* begin,
+                               const int* end,
+                               const int* row_offsets,
+                               const int* out_offsets,
+                               int row_count,
+                               int* out_begin,
+                               int* out_end)
+    {
+        int row = blockDim.x * blockIdx.x + threadIdx.x;
+        if (row >= row_count) return;
+
+        int start = row_offsets[row];
+        int stop  = row_offsets[row + 1];
+        int write_pos = out_offsets[row];
+
+        if (start >= stop) {
+            return;
+        }
+
+        int active_begin = begin[start];
+        int active_end   = end[start];
+
+        for (int idx = start + 1; idx < stop; ++idx) {
+            int seg_begin = begin[idx];
+            int seg_end   = end[idx];
+            if (seg_begin <= active_end) {
+                if (seg_end > active_end) {
+                    active_end = seg_end;
+                }
+            } else {
+                out_begin[write_pos] = active_begin;
+                out_end[write_pos]   = active_end;
+                ++write_pos;
+                active_begin = seg_begin;
+                active_end   = seg_end;
+            }
+        }
+
+        out_begin[write_pos] = active_begin;
+        out_end[write_pos]   = active_end;
+    }
+    """
+)

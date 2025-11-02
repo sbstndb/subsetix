@@ -4,14 +4,18 @@ import numpy as np
 
 from subsetix_cupy import (
     CuPyWorkspace,
+    IntervalField,
     build_interval_set,
+    create_interval_field,
     evaluate,
+    get_cell,
     make_complement,
     make_difference,
     make_input,
     make_intersection,
     make_symmetric_difference,
     make_union,
+    set_cell,
 )
 from subsetix_cupy.expressions import _REAL_CUPY
 
@@ -193,6 +197,39 @@ class ExpressionTest(unittest.TestCase):
         np.testing.assert_array_equal(
             cp.asnumpy(result.row_offsets), np.array([0, 1, 3, 4], dtype=np.int32)
         )
+
+
+@unittest.skipUnless(_REAL_CUPY is not None, "CuPy backend with CUDA required")
+class IntervalFieldTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cp = _REAL_CUPY
+        assert self.cp is not None
+        self.interval_set = build_interval_set(
+            row_offsets=[0, 2, 3],
+            begin=[0, 4, 1],
+            end=[3, 6, 5],
+        )
+
+    def test_create_interval_field(self) -> None:
+        field = create_interval_field(self.interval_set, fill_value=2.5, dtype=self.cp.float32)
+        self.assertIsInstance(field, IntervalField)
+        self.assertEqual(field.values.size, 9)
+        self.assertTrue(bool(self.cp.all(field.values == self.cp.float32(2.5))))
+        self.assertEqual(int(field.interval_cell_offsets[-1].item()), 9)
+
+    def test_set_and_get_cell(self) -> None:
+        field = create_interval_field(self.interval_set, fill_value=0.0, dtype=self.cp.float32)
+
+        updated = set_cell(field, row=0, x=1, value=7.0)
+        self.assertTrue(updated)
+        value = get_cell(field, row=0, x=1)
+        self.assertIsNotNone(value)
+        self.assertAlmostEqual(float(value.item()), 7.0)
+
+        # Outside active intervals should return None / False
+        self.assertIsNone(get_cell(field, row=0, x=3))
+        self.assertFalse(set_cell(field, row=1, x=0, value=3.0))
+
 
 
 if __name__ == "__main__":

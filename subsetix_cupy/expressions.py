@@ -354,7 +354,9 @@ def _apply_binary_gpu(
         offsets = cp.zeros(1, dtype=cp.int32)
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
 
-    count_kernel, write_kernel = _get_kernels(cp)
+    kernels = _get_kernels(cp)
+    count_kernel = kernels[0]
+    write_kernel = kernels[1]
     if workspace is not None:
         counts = workspace.ensure_counts(row_count)
     else:

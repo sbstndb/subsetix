@@ -13,6 +13,21 @@ from .expressions import (
     make_symmetric_difference,
     make_union,
 )
+from .interval_field import IntervalField, create_interval_field, get_cell, set_cell
+from .multilevel import (
+    MultiLevel2D,
+    MultiLevelField2D,
+    covered_by_fine,
+    coarse_only,
+    prolong_field,
+    prolong_level_field,
+    prolong_level_sets,
+    prolong_set,
+    restrict_field,
+    restrict_level_field,
+    restrict_level_sets,
+    restrict_set,
+)
 
 __all__ = [
     "Expr",
@@ -26,4 +41,20 @@ __all__ = [
     "make_intersection",
     "make_symmetric_difference",
     "make_union",
+    "IntervalField",
+    "create_interval_field",
+    "get_cell",
+    "set_cell",
+    "MultiLevel2D",
+    "MultiLevelField2D",
+    "prolong_set",
+    "restrict_set",
+    "prolong_field",
+    "restrict_field",
+    "prolong_level_sets",
+    "restrict_level_sets",
+    "prolong_level_field",
+    "restrict_level_field",
+    "covered_by_fine",
+    "coarse_only",
 ]
