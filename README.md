@@ -72,6 +72,26 @@ python -m subsetix_cupy.benchmark_multishape \
 The script prints interval counts, total time, time per iteration, and average
 nanoseconds per produced interval.
 
+### Benchmark Suite (GPU micro-benchmarks)
+
+Use the dedicated harness to profile the core functionalities (expressions,
+morphology, multilevel helpers, AMR step, VTK export):
+
+```bash
+# List available cases
+python -m subsetix_cupy.benchmarks --list
+
+# Run everything (default repeat/warmup per case)
+python -m subsetix_cupy.benchmarks
+
+# Filter with a regex, override repeat/warmup and export JSON
+python -m subsetix_cupy.benchmarks --pattern "amr_" --repeat 5 --warmup 2 --json results.json
+```
+
+The suite uses `cupyx.profiler.benchmark` under the hood, so timings are based
+on CUDA events. Each case prints average GPU time (ms) plus the standard
+deviation across repeats.
+
 ## Testing
 
 ```bash

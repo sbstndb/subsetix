@@ -153,9 +153,11 @@ def _row_ids(interval_set: IntervalSet):
     row_count = interval_set.row_count
     if row_count == 0:
         return cp.zeros(0, dtype=cp.int32)
+    # Device-only computation of repeats per row to avoid host round-trip
     row_offsets = interval_set.row_offsets
-    counts_host = np.asarray(cp.asnumpy(row_offsets[1:] - row_offsets[:-1]), dtype=np.int32)
-    return cp.repeat(cp.arange(row_count, dtype=cp.int32), counts_host.tolist())
+    counts = (row_offsets[1:] - row_offsets[:-1]).astype(cp.int32, copy=False)
+    rows = cp.arange(row_count, dtype=cp.int32)
+    return cp.repeat(rows, counts)
 
 
 def _prolong_set_impl(interval_set: IntervalSet, ratio: int):
@@ -240,6 +242,7 @@ def restrict_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
     coarse_begin = coarse_begin[mask]
     coarse_end = coarse_end[mask]
 
+    # Ensure segments are ordered by (row, begin) for per-row merging.
     order = cp.lexsort(cp.stack((coarse_begin, coarse_rows)))
     coarse_rows = coarse_rows[order]
     coarse_begin = coarse_begin[order]
