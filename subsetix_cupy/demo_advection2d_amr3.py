@@ -371,18 +371,28 @@ def main():
         ev_e.record(); ev_e.synchronize(); wall1 = time.perf_counter()
 
         # Write-back keeping consistency
-        u2 = u2.copy()
-        u2[L2_mask] = u2_new[L2_mask]
-        u2[~L2_mask] = _prolong_repeat(u1, R)[~L2_mask]
+        # Build next-step hierarchy bottom-up so coarse levels see fine updates.
+        u2_next = u2.copy()
+        u2_next[L2_mask] = u2_new[L2_mask]
 
-        u1 = u1.copy()
-        u1[L1_mask & (~refine1_mid)] = u1_new[L1_mask & (~refine1_mid)]
-        u1[refine1_mid] = _restrict_mean(u2_new, R)[refine1_mid]
-        u1[~L1_mask] = _prolong_repeat(u0, R)[~L1_mask]
+        u1_next = u1.copy()
+        mid_only = L1_mask & (~refine1_mid)
+        u1_next[mid_only] = u1_new[mid_only]
+        u2_new_restricted = _restrict_mean(u2_new, R)
+        u1_next[refine1_mid] = u2_new_restricted[refine1_mid]
+        u0_new_prolong = _prolong_repeat(u0_new, R)
+        u1_next[~L1_mask] = u0_new_prolong[~L1_mask]
 
-        u0 = u0.copy()
-        u0[~refine0] = u0_new[~refine0]
-        u0[refine0] = _restrict_mean(u1_new, R)[refine0]
+        u1_next_prolong = _prolong_repeat(u1_next, R)
+        u2_next[~L2_mask] = u1_next_prolong[~L2_mask]
+
+        u0_next = u0.copy()
+        u0_next[~refine0] = u0_new[~refine0]
+        u0_next[refine0] = _restrict_mean(u1_next, R)[refine0]
+
+        u2 = u2_next
+        u1 = u1_next
+        u0 = u0_next
 
         step_gpu = cp.cuda.get_elapsed_time(ev_s, ev_e)
         step_wall = (wall1 - wall0) * 1000.0
