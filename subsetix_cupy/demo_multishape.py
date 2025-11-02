@@ -31,7 +31,11 @@ from . import (
     make_intersection,
     make_union,
 )
-from .plot_utils import intervals_to_mask as _mask_from_intervals
+from .plot_utils import (
+    intervals_to_mask as _mask_from_intervals,
+    make_cell_collection,
+    setup_cell_axes,
+)
 
 Rectangle = Tuple[int, int, int, int]  # (x0, x1, y0, y1)
 Circle = Tuple[int, int, int]  # (cx, cy, radius)
@@ -107,15 +111,26 @@ def _intervals_to_mask(interval_set: IntervalSet, width: int) -> Tuple[np.ndarra
     return mask, offsets
 
 
-def _plot_masks(mask_infos: Sequence[Tuple[np.ndarray, str]]) -> None:
-    cols = len(mask_infos)
+def _plot_cell_sets(
+    sets: Sequence[Tuple[IntervalSet, str, str]],
+    width: int,
+    height: int,
+) -> None:
+    cols = len(sets)
     fig, axes = plt.subplots(1, cols, figsize=(4 * cols, 4))
     if cols == 1:
         axes = [axes]
-    for ax, (mask, title) in zip(axes, mask_infos):
-        ax.imshow(mask, origin="lower", cmap="viridis")
-        ax.set_title(title)
-        ax.axis("off")
+    for ax, (interval_set, title, color) in zip(axes, sets):
+        collection = make_cell_collection(
+            interval_set,
+            height,
+            1,
+            facecolor=color,
+            edgecolor="k",
+            linewidth=0.2,
+        )
+        ax.add_collection(collection)
+        setup_cell_axes(ax, width, height, title=title)
     fig.tight_layout()
     plt.show()
 
@@ -251,15 +266,12 @@ def main() -> None:
     rect_mask, rect_offsets = _intervals_to_mask(rect_set, width)
     circle_mask, circle_offsets = _intervals_to_mask(circle_set, width)
 
-    union_mask, union_offsets = _intervals_to_mask(
-        evaluate(make_union(rect_expr, circle_expr), workspace), width
-    )
-    intersection_mask, intersection_offsets = _intervals_to_mask(
-        evaluate(make_intersection(rect_expr, circle_expr), workspace), width
-    )
-    difference_mask, difference_offsets = _intervals_to_mask(
-        evaluate(make_difference(rect_expr, circle_expr), workspace), width
-    )
+    union_set = evaluate(make_union(rect_expr, circle_expr), workspace)
+    union_mask, union_offsets = _intervals_to_mask(union_set, width)
+    intersection_set = evaluate(make_intersection(rect_expr, circle_expr), workspace)
+    intersection_mask, intersection_offsets = _intervals_to_mask(intersection_set, width)
+    difference_set = evaluate(make_difference(rect_expr, circle_expr), workspace)
+    difference_mask, difference_offsets = _intervals_to_mask(difference_set, width)
 
     print("Resolution:", width, "x", height)
     print("Rectangles count:", len(rectangles))
@@ -271,14 +283,16 @@ def main() -> None:
     print("Difference intervals:", int(difference_offsets[-1]))
 
     if not args.no_plot:
-        _plot_masks(
+        _plot_cell_sets(
             [
-                (rect_mask, "Rectangles"),
-                (circle_mask, "Circles"),
-                (union_mask, "Union"),
-                (intersection_mask, "Intersection"),
-                (difference_mask, "Rectangles \\ Circles"),
-            ]
+                (rect_set, "Rectangles", "#8fd694"),
+                (circle_set, "Circles", "#ffb347"),
+                (union_set, "Union", "#7fa2ff"),
+                (intersection_set, "Intersection", "#ff6961"),
+                (difference_set, "Rectangles \\ Circles", "#c18aff"),
+            ],
+            width,
+            height,
         )
 
 
