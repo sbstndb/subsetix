@@ -153,11 +153,14 @@ def _row_ids(interval_set: IntervalSet):
     row_count = interval_set.row_count
     if row_count == 0:
         return cp.zeros(0, dtype=cp.int32)
-    # Device-only computation of repeats per row to avoid host round-trip
-    row_offsets = interval_set.row_offsets
-    counts = (row_offsets[1:] - row_offsets[:-1]).astype(cp.int32, copy=False)
-    rows = cp.arange(row_count, dtype=cp.int32)
-    return cp.repeat(rows, counts)
+    # Map each interval index to its row using device-only search on row offsets.
+    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
+    total = int(row_offsets[-1].item())
+    if total == 0:
+        return cp.zeros(0, dtype=cp.int32)
+    idx = cp.arange(total, dtype=cp.int32)
+    # For idx in [row_offsets[r], row_offsets[r+1]) → searchsorted(row_offsets[1:], idx) == r
+    return cp.searchsorted(row_offsets[1:], idx, side='right').astype(cp.int32, copy=False)
 
 
 def _prolong_set_impl(interval_set: IntervalSet, ratio: int):
