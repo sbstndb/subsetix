@@ -205,15 +205,26 @@ def write_unstructured_quads_vtu(
     types: List[int] = []
     levels: List[int] = []
     values: List[float] = []
+    ghosts: List[int] = []
 
-    for mask, u, lvl, dx, dy, x0, y0 in cells:
+    for entry in cells:
+        if len(entry) == 7:
+            mask, u, lvl, dx, dy, x0, y0 = entry
+            ghost = None
+        else:
+            mask, u, lvl, dx, dy, x0, y0, ghost = entry
         m = _to_numpy(mask).astype(bool, copy=False)
         arr = _to_numpy(u).astype(np.float32, copy=False)
+        g_arr = None if ghost is None else _to_numpy(ghost).astype(bool, copy=False)
         idxs = np.argwhere(m)
         for i, j in idxs:
             _append_cell(points, connectivity, offsets, types, x0, y0, dx, dy, int(i), int(j))
             levels.append(int(lvl))
             values.append(float(arr[i, j]))
+            if g_arr is None:
+                ghosts.append(0)
+            else:
+                ghosts.append(int(bool(g_arr[i, j])))
 
     P = np.asarray(points, dtype=np.float32)
     C = np.asarray(connectivity, dtype=np.int32)
@@ -230,6 +241,8 @@ def write_unstructured_quads_vtu(
         f.write(f"    <Piece NumberOfPoints=\"{P.shape[0]}\" NumberOfCells=\"{len(L)}\">\n")
         f.write("      <CellData Scalars=\"u\">\n")
         _write_dataarray_ascii(f, "level", L, "Int32")
+        ghost_arr = np.asarray(ghosts, dtype=np.int32)
+        _write_dataarray_ascii(f, "ghost_mask", ghost_arr, "Int32")
         _write_dataarray_ascii(f, "u", U, "Float32")
         f.write("      </CellData>\n")
         f.write("      <Points>\n")
