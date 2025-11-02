@@ -10,12 +10,12 @@ Usage example:
 from __future__ import annotations
 
 import argparse
+from typing import List, Tuple
+
 import time
 
 import cupy as cp
 import numpy as np
-
-from .geometry import interval_set_to_mask
 from .simulation import (
     AMR2Simulation,
     AMRState,
@@ -23,15 +23,7 @@ from .simulation import (
     SimulationStats,
     TwoLevelVTKExporter,
 )
-
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
-    from matplotlib import animation as mpl_animation
-except ImportError:  # pragma: no cover - plotting is optional
-    plt = None
-    mcolors = None
-    mpl_animation = None
+from .visualize import capture_frame, render
 
 
 def run_demo(args: argparse.Namespace):
@@ -52,7 +44,7 @@ def run_demo(args: argparse.Namespace):
     sim = AMR2Simulation(config)
     sim.initialize_square(amplitude=float(args.square_amp))
 
-    history: list[tuple[int, cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]] = []
+    history: List[Tuple[int, cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]] = []
 
     exporters = []
     if args.save_vtk:
@@ -88,18 +80,7 @@ def run_demo(args: argparse.Namespace):
     def _animation_listener(state: AMRState, stats: SimulationStats) -> None:
         if not args.animate:
             return
-        history.append(
-            (
-                stats.step,
-                cp.array(state.coarse, copy=True),
-                cp.array(state.fine, copy=True),
-                cp.array(state.refine_mask, copy=True),
-                cp.array(
-                    interval_set_to_mask(state.geometry.coarse_only, state.refine_mask.shape[1]),
-                    copy=True,
-                ),
-            )
-        )
+        history.append(capture_frame(state, stats.step))
 
     listeners = [_verbose_listener, _animation_listener]
 
@@ -122,72 +103,16 @@ def run_demo(args: argparse.Namespace):
 
     print(f"Completed {args.steps} steps in {elapsed:.2f}s ({elapsed / max(1, args.steps):.4f}s/step)")
 
-    if args.plot or args.animate:
-        _visualise(final_state, final_stats.dt, history if args.animate else None, args)
-
-
-def _visualise(state: AMRState, dt: float, history, args: argparse.Namespace):
-    if plt is None or mcolors is None:
-        raise RuntimeError("matplotlib is required for plotting or animation")
-
-    refined_mask = state.refine_mask
-    coarse_only_mask = interval_set_to_mask(state.geometry.coarse_only, refined_mask.shape[1])
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    fig.suptitle(f"Two-level AMR (ratio=2, dt={dt:.5f})")
-
-    fine_img = axes[0].imshow(
-        cp.asnumpy(state.fine),
-        origin="lower",
-        cmap="turbo",
-        animated=args.animate,
-        vmin=0.0,
-        vmax=1.0,
+    render(
+        final_state,
+        final_stats.dt,
+        history,
+        animate=args.animate,
+        plot=args.plot,
+        interval=args.interval,
+        loop=args.loop,
+        save_animation=args.save_animation,
     )
-    axes[0].set_title("Fine field")
-    fig.colorbar(fine_img, ax=axes[0], fraction=0.046)
-
-    level_overlay = np.zeros((*refined_mask.shape, 3), dtype=np.float32)
-    level_overlay[..., 0] = cp.asnumpy(refined_mask)  # red: refined
-    level_overlay[..., 1] = cp.asnumpy(coarse_only_mask)  # green: coarse-only
-    level_img = axes[1].imshow(level_overlay, origin="lower", animated=args.animate)
-    axes[1].set_title("Level map (red = refine)")
-
-    plt.tight_layout()
-
-    if not args.animate:
-        plt.show()
-        return
-
-    if mpl_animation is None:
-        raise RuntimeError("matplotlib.animation required for --animate")
-    if history is None or not history:
-        raise RuntimeError("animation history is empty")
-
-    def _update(frame_idx):
-        (_, _, fine_frame, refine_frame, coarse_only_frame) = history[frame_idx]
-        fine_img.set_array(cp.asnumpy(fine_frame))
-        overlay = np.zeros((*refine_frame.shape, 3), dtype=np.float32)
-        overlay[..., 0] = cp.asnumpy(refine_frame)
-        overlay[..., 1] = cp.asnumpy(coarse_only_frame)
-        level_img.set_array(overlay)
-        axes[1].set_xlabel(f"frame {frame_idx+1}/{len(history)}")
-        return fine_img, level_img
-
-    anim = mpl_animation.FuncAnimation(
-        fig,
-        _update,
-        frames=len(history),
-        interval=max(20, args.interval),
-        blit=True,
-        repeat=args.loop,
-    )
-
-    if args.save_animation is not None:
-        anim.save(args.save_animation, fps=1000.0 / max(1, args.interval))
-        print(f"Saved animation to {args.save_animation}")
-    else:
-        plt.show()
 
 
 def create_argparser() -> argparse.ArgumentParser:
@@ -237,4 +162,3 @@ def main(argv: list[str] | None = None):
 
 if __name__ == "__main__":
     main()
-
