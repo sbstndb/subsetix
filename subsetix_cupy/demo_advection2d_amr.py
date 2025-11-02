@@ -104,6 +104,12 @@ def main():
     ap.add_argument("--coarse", type=int, default=96)
     ap.add_argument("--ratio", type=int, default=2)
     ap.add_argument("--refine-frac", type=float, default=0.10)
+    ap.add_argument(
+        "--hysteresis",
+        type=float,
+        default=0.5,
+        help="Low threshold as fraction of high (0 disables, 0.5 => low=0.5*refine_frac)",
+    )
     ap.add_argument("--regrid-every", type=int, default=5, help="Recompute refine mask every N steps")
     ap.add_argument("--velocity", type=float, nargs=2, default=[0.6, 0.2], metavar=("a", "b"))
     ap.add_argument("--cfl", type=float, default=0.9)
@@ -129,14 +135,27 @@ def main():
     u0 = _init_condition(W, H)
     u1 = _prolong_repeat(u0, R)  # init fine as prolongation of coarse
 
-    # Initial refine mask from gradient on coarse
+    # Initial refine mask from gradient on coarse (no hysteresis on first step)
     g0 = _grad_mag(u0)
     refine0 = _percentile_mask(g0, args.refine_frac)  # bool coarse mask
     L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
 
     def _regrid_from_coarse(u0, u1, refine0_old):
         g = _grad_mag(u0)
-        refine_new = _percentile_mask(g, args.refine_frac)
+        # Hysteresis thresholds: high from refine_frac, low scaled by --hysteresis
+        frac_high = float(args.refine_frac)
+        frac_low = max(0.0, min(1.0, frac_high * float(args.hysteresis))) if args.hysteresis > 0 else 0.0
+        if frac_high <= 0.0:
+            refine_new = cp.zeros_like(refine0_old, dtype=cp.bool_)
+        else:
+            # Compute thresholds via percentiles over the coarse grid
+            flat = g.ravel()
+            t_high = cp.percentile(flat, (1.0 - frac_high) * 100.0)
+            if frac_low > 0.0:
+                t_low = cp.percentile(flat, (1.0 - frac_low) * 100.0)
+                refine_new = (g >= t_high) | (refine0_old & (g >= t_low))
+            else:
+                refine_new = g >= t_high
         L1_new = _prolong_repeat(refine_new.astype(cp.uint8), R).astype(cp.bool_)
         # Transfer values between levels
         # Coarse <- Fine (cells leaving fine)
