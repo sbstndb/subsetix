@@ -28,6 +28,12 @@ from .multilevel import (
     restrict_level_sets,
     restrict_set,
 )
+from .morphology import (
+    dilate_interval_set,
+    erode_interval_set,
+    full_interval_set,
+    ghost_zones,
+)
 
 __all__ = [
     "Expr",
@@ -57,4 +63,8 @@ __all__ = [
     "restrict_level_field",
     "covered_by_fine",
     "coarse_only",
+    "dilate_interval_set",
+    "erode_interval_set",
+    "ghost_zones",
+    "full_interval_set",
 ]
