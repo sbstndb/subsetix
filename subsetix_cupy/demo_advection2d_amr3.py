@@ -272,6 +272,10 @@ def main():
     refine1_mid = refine1_mid & (
         _erode_mo(L1_mask, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask, wrap=(args.bc == 'wrap'))
     )
+    # Child-forces-parent: any L2 present within an L0 coarse cell forces L1 on that parent
+    coarse_force_l1 = refine1_mid.reshape(H, R, W, R).any(axis=(1, 3))
+    refine0 = refine0 | coarse_force_l1
+    L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
     L2_mask = _prolong_repeat(refine1_mid.astype(cp.uint8), R).astype(cp.bool_)
 
     # Plot setup
@@ -386,6 +390,10 @@ def main():
             refine1_mid_new = refine1_mid_new & (
                 _erode_mo(L1_mask_new, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask_new, wrap=(args.bc == 'wrap'))
             )
+            # Child-forces-parent: if any mid child in a coarse parent is refined to L2, keep that parent at L1
+            coarse_force_l1_new = refine1_mid_new.reshape(H, R, W, R).any(axis=(1, 3))
+            refine0_new = refine0_new | coarse_force_l1_new
+            L1_mask_new = _prolong_repeat(refine0_new.astype(cp.uint8), R).astype(cp.bool_)
 
             # Transfers L2<->L1
             leaving2 = refine1_mid & (~refine1_mid_new)
