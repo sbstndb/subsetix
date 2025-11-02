@@ -18,6 +18,12 @@ from .fields import (
     synchronize_two_level,
 )
 from .export import save_two_level_vtk
+from .api import (
+    Box,
+    TwoLevelMesh,
+    make_scalar_field,
+    MRAdaptor,
+)
 from .simulation import (
     AMR2Simulation,
     AMRState,
@@ -39,6 +45,10 @@ __all__ = [
     "restrict_fine_to_coarse",
     "synchronize_two_level",
     "save_two_level_vtk",
+    "Box",
+    "TwoLevelMesh",
+    "make_scalar_field",
+    "MRAdaptor",
     "AMR2Simulation",
     "AMRState",
     "SimulationConfig",
