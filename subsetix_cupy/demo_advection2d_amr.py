@@ -117,6 +117,13 @@ def main():
     ap.add_argument("--bc", type=str, choices=["clamp", "wrap"], default="clamp")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--interval", type=int, default=60)
+    ap.add_argument(
+        "--ic",
+        type=str,
+        choices=["gauss", "sharp", "disk"],
+        default="gauss",
+        help="Initial condition: smooth gaussians (gauss), sharper peaks (sharp), or binary disks (disk)",
+    )
     args = ap.parse_args()
 
     W = H = int(args.coarse)
@@ -132,7 +139,25 @@ def main():
     print(f"Coarse {W}x{H}, ratio={R}, dt={dt:.6f} (CFL={args.cfl}, fine spacing)")
 
     # State on each level
-    u0 = _init_condition(W, H)
+    # Initial condition
+    if args.ic == "gauss":
+        u0 = _init_condition(W, H)
+    elif args.ic == "sharp":
+        # Sharper variant: narrower gaussians and stronger amplitudes
+        xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
+        yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
+        X, Y = cp.meshgrid(xx, yy)
+        g1 = cp.exp(-((X - 0.30) ** 2 + (Y - 0.65) ** 2) / (2 * 0.03**2))
+        g2 = cp.exp(-((X - 0.70) ** 2 + (Y - 0.30) ** 2) / (2 * 0.035**2))
+        ridge = cp.maximum(0.0, 1.0 - 60.0 * (Y - 0.5) ** 2)
+        u0 = (1.2 * g1 + 1.0 * g2 + 0.25 * ridge).astype(cp.float32, copy=False)
+    else:  # disk
+        xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
+        yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
+        X, Y = cp.meshgrid(xx, yy)
+        d1 = ((X - 0.35) ** 2 + (Y - 0.6) ** 2) <= (0.12 ** 2)
+        d2 = ((X - 0.68) ** 2 + (Y - 0.32) ** 2) <= (0.10 ** 2)
+        u0 = (d1 | d2).astype(cp.float32)
     u1 = _prolong_repeat(u0, R)  # init fine as prolongation of coarse
 
     # Initial refine mask from gradient on coarse (no hysteresis on first step)
@@ -212,12 +237,14 @@ def main():
         u1_new = _step_upwind(u1_pad, a, b, dt, dx_f, dy_f, args.bc)
         ev_stop.record(); ev_stop.synchronize(); wall1 = time.perf_counter()
 
-        # Write back only in active sets
+        # Write back: coarse outside refined from u0_new; inside refined from restricted fine update
+        u1_restr_new = _restrict_mean(u1_new, R)
         u0 = u0.copy()
         u0[~refine0] = u0_new[~refine0]
+        u0[refine0] = u1_restr_new[refine0]
+        # Fine: keep updated values in L1, and stay consistent outside L1 with prolonged coarse
         u1 = u1.copy()
         u1[L1_mask] = u1_new[L1_mask]
-        # Keep consistency outside fine patch
         u1[~L1_mask] = u0_prol[~L1_mask]
 
         step_gpu = cp.cuda.get_elapsed_time(ev_start, ev_stop)
