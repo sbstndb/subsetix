@@ -262,19 +262,26 @@ def main():
     u1 = _prolong_repeat(u0, R)
     u2 = _prolong_repeat(u1, R)
 
-    # Initial masks: refine L0 -> L1; refine L1 -> L2 (gated inside L1)
+    # Initial masks: refine L0 -> L1
     g0 = _grad_mag(u0)
     refine0 = _hysteresis_mask(g0, args.refine_frac, args.refine_frac * args.hysteresis, None)
+    L1_mask_base = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
+    # Expand L1 by one mid-cell ring to ensure space for interface halos
+    _dilate = _dilate_mo if args.grading == 'moore' else _dilate_vn
+    L1_expanded = _dilate(L1_mask_base, wrap=(args.bc == 'wrap'))
+    # Parent consistency: any expanded L1 mid cell forces its coarse parent to be L1
+    coarse_force_from_L1ring = L1_expanded.reshape(H, R, W, R).any(axis=(1, 3))
+    refine0 = refine0 | coarse_force_from_L1ring
     L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
+    # L1 -> L2 (gated inside expanded L1)
     g1 = _grad_mag(u1)
     refine1_mid = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, None)
-    # Enforce grading: L2 must be at least one mid-cell away from L1 boundary
     refine1_mid = refine1_mid & (
         _erode_mo(L1_mask, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask, wrap=(args.bc == 'wrap'))
     )
-    # Child-forces-parent: any L2 present within an L0 coarse cell forces L1 on that parent
-    coarse_force_l1 = refine1_mid.reshape(H, R, W, R).any(axis=(1, 3))
-    refine0 = refine0 | coarse_force_l1
+    # Child-forces-parent: any L2 present forces its coarse parent to be L1 (keeps L1 around L2)
+    coarse_force_from_L2 = refine1_mid.reshape(H, R, W, R).any(axis=(1, 3))
+    refine0 = refine0 | coarse_force_from_L2
     L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
     L2_mask = _prolong_repeat(refine1_mid.astype(cp.uint8), R).astype(cp.bool_)
 
@@ -379,14 +386,17 @@ def main():
 
         # Regridding periodically (from level-specific gradients)
         if ((step + 1) % max(1, int(args.regrid_every))) == 0:
-            # L0 -> L1
+            # L0 -> L1 (with ring expansion on mid grid)
             g0 = _grad_mag(u0)
             refine0_new = _hysteresis_mask(g0, args.refine_frac, args.refine_frac * args.hysteresis, refine0)
+            L1_mask_new_base = _prolong_repeat(refine0_new.astype(cp.uint8), R).astype(cp.bool_)
+            L1_ring_new = (_dilate_mo if args.grading=='moore' else _dilate_vn)(L1_mask_new_base, wrap=(args.bc=='wrap'))
+            coarse_force_from_L1ring_new = L1_ring_new.reshape(H, R, W, R).any(axis=(1,3))
+            refine0_new = refine0_new | coarse_force_from_L1ring_new
             L1_mask_new = _prolong_repeat(refine0_new.astype(cp.uint8), R).astype(cp.bool_)
-            # L1 -> L2 (gated inside L1)
+            # L1 -> L2 (gated inside expanded L1)
             g1 = _grad_mag(u1)
             refine1_mid_new = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, refine1_mid)
-            # Enforce grading again with the updated L1
             refine1_mid_new = refine1_mid_new & (
                 _erode_mo(L1_mask_new, wrap=(args.bc == 'wrap')) if args.grading == 'moore' else _erode_vn(L1_mask_new, wrap=(args.bc == 'wrap'))
             )
