@@ -212,11 +212,11 @@ def main():
             H1 = None
 
         # Rebuild collections each frame for simplicity and correctness
-        axes[0].collections.clear()
-        axes[1].collections.clear()
+        del axes[0].collections[:]
+        del axes[1].collections[:]
         if args.show_halos:
-            axes[2].collections.clear()
-            axes[3].collections.clear()
+            del axes[2].collections[:]
+            del axes[3].collections[:]
 
         axes[0].add_collection(make_cell_collection(R0, width, 1, facecolor="#ffb347"))
         setup_cell_axes(axes[0], width, height, title="Refine mask (L0)")
@@ -232,7 +232,7 @@ def main():
             setup_cell_axes(axes[3], width, height, title="H1 (fine)")
 
         ax_idx = 2 if not args.show_halos else 4
-        axes[ax_idx].collections.clear()
+        del axes[ax_idx].collections[:]
         axes[ax_idx].add_collection(make_cell_collection(L0, width, 1, facecolor="#bdbdbd"))
         setup_cell_axes(axes[ax_idx], width, height, title="L0 (coarse)")
 
@@ -254,4 +254,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
