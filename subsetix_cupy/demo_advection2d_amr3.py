@@ -26,7 +26,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from .plot_utils import make_cell_collection, setup_cell_axes
-from .export_vtk import save_amr3_step_vtr, write_pvd
+from .export_vtk import save_amr3_step_vtr, save_amr3_mesh_vtu, write_pvd
 
 
 def _init_condition(W: int, H: int, kind: str = "sharp", amp: float = 1.0) -> cp.ndarray:
@@ -250,6 +250,7 @@ def main():
     ap.add_argument("--save-vtk", type=str, default=None, help="Output directory for VTK (.vtr/.pvd) export")
     ap.add_argument("--save-every", type=int, default=0, help="Save every N steps (0=disable)")
     ap.add_argument("--save-base", type=str, default="amr3", help="Base filename for VTK outputs")
+    ap.add_argument("--save-mesh", action="store_true", help="Also save an unstructured mesh (.vtu) with active cells and per-cell u, level")
     args = ap.parse_args()
 
     W = H = int(args.coarse)
@@ -427,6 +428,30 @@ def main():
                 dx2=dx2,
                 dy2=dy2,
             )
+            # Optionally add a unified unstructured mesh
+            if args.save_mesh:
+                coarse_only = (~refine0)
+                mid_only = L1_mask & (~refine1_mid)
+                fine_active = L2_mask
+                mesh_fname = save_amr3_mesh_vtu(
+                    args.save_vtk,
+                    args.save_base,
+                    step,
+                    u0=u0,
+                    u1=u1,
+                    u2=u2,
+                    coarse_only=coarse_only,
+                    mid_only=mid_only,
+                    fine_active=fine_active,
+                    dx0=dx0,
+                    dy0=dy0,
+                    dx1=dx1,
+                    dy1=dy1,
+                    dx2=dx2,
+                    dy2=dy2,
+                )
+                rels = rels + [mesh_fname]
+                pvd_entry = (pvd_entry[0], rels)
             pvd_entries.append(pvd_entry)
             write_pvd(os.path.join(args.save_vtk, f"{args.save_base}.pvd"), pvd_entries)
 

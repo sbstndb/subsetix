@@ -173,3 +173,114 @@ def save_amr3_step_vtr(
     rels = [f0, f1, f2]
     return rels, (time_value, rels)
 
+
+def _append_cell(points: List[Tuple[float, float, float]],
+                 connectivity: List[int], offsets: List[int], types: List[int],
+                 x0: float, y0: float, dx: float, dy: float, i: int, j: int) -> None:
+    # 4 points per quad, order: (x0,y0),(x1,y0),(x1,y1),(x0,y1)
+    idx0 = len(points)
+    x = x0 + j * dx; y = y0 + i * dy
+    points.append((x, y, 0.0))
+    points.append((x + dx, y, 0.0))
+    points.append((x + dx, y + dy, 0.0))
+    points.append((x, y + dy, 0.0))
+    connectivity.extend([idx0, idx0 + 1, idx0 + 2, idx0 + 3])
+    offsets.append(len(connectivity))
+    types.append(9)  # VTK_QUAD
+
+
+def write_unstructured_quads_vtu(
+    path: str,
+    cells: List[Tuple[np.ndarray, np.ndarray, int, float, float, float, float]],
+    origin=(0.0, 0.0),
+) -> None:
+    """Write a single UnstructuredGrid (.vtu) where each selected cell across levels becomes a quad.
+
+    cells: list of tuples (mask, u, level_id, dx, dy, x0, y0) per level.
+    u is sampled cell-centered per cell; level_id is written to CellData 'level'.
+    """
+    points: List[Tuple[float, float, float]] = []
+    connectivity: List[int] = []
+    offsets: List[int] = []
+    types: List[int] = []
+    levels: List[int] = []
+    values: List[float] = []
+
+    for mask, u, lvl, dx, dy, x0, y0 in cells:
+        m = _to_numpy(mask).astype(bool, copy=False)
+        arr = _to_numpy(u).astype(np.float32, copy=False)
+        idxs = np.argwhere(m)
+        for i, j in idxs:
+            _append_cell(points, connectivity, offsets, types, x0, y0, dx, dy, int(i), int(j))
+            levels.append(int(lvl))
+            values.append(float(arr[i, j]))
+
+    P = np.asarray(points, dtype=np.float32)
+    C = np.asarray(connectivity, dtype=np.int32)
+    O = np.asarray(offsets, dtype=np.int32)
+    T = np.asarray(types, dtype=np.uint8)
+    L = np.asarray(levels, dtype=np.int32)
+    U = np.asarray(values, dtype=np.float32)
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("<?xml version=\"1.0\"?>\n")
+        f.write("<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n")
+        f.write("  <UnstructuredGrid>\n")
+        f.write(f"    <Piece NumberOfPoints=\"{P.shape[0]}\" NumberOfCells=\"{len(L)}\">\n")
+        f.write("      <CellData Scalars=\"u\">\n")
+        _write_dataarray_ascii(f, "level", L, "Int32")
+        _write_dataarray_ascii(f, "u", U, "Float32")
+        f.write("      </CellData>\n")
+        f.write("      <Points>\n")
+        f.write('        <DataArray type="Float32" NumberOfComponents="3" format="ascii">\n')
+        for i in range(0, P.shape[0], 4096):
+            chunk = P[i : i + 4096]
+            f.write("          ")
+            f.write(" ".join(f"{x} {y} 0" for x, y, _ in chunk))
+            f.write("\n")
+        f.write("        </DataArray>\n")
+        f.write("      </Points>\n")
+        f.write("      <Cells>\n")
+        _write_dataarray_ascii(f, "connectivity", C, "Int32")
+        _write_dataarray_ascii(f, "offsets", O, "Int32")
+        _write_dataarray_ascii(f, "types", T, "UInt8")
+        f.write("      </Cells>\n")
+        f.write("    </Piece>\n")
+        f.write("  </UnstructuredGrid>\n")
+        f.write("</VTKFile>\n")
+
+
+def save_amr3_mesh_vtu(
+    out_dir: str,
+    base: str,
+    step: int,
+    *,
+    u0,
+    u1,
+    u2,
+    coarse_only,
+    mid_only,
+    fine_active,
+    dx0: float,
+    dy0: float,
+    dx1: float,
+    dy1: float,
+    dx2: float,
+    dy2: float,
+    origin=(0.0, 0.0),
+) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    fname = f"{base}_step{step:04d}_mesh.vtu"
+    path = os.path.join(out_dir, fname)
+    x0, y0 = origin
+    write_unstructured_quads_vtu(
+        path,
+        cells=[
+            (coarse_only, u0, 0, dx0, dy0, x0, y0),
+            (mid_only, u1, 1, dx1, dy1, x0, y0),
+            (fine_active, u2, 2, dx2, dy2, x0, y0),
+        ],
+        origin=(x0, y0),
+    )
+    return fname
