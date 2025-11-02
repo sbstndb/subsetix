@@ -112,6 +112,24 @@ def _dilate_vn(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
     return mask | up | down | left | right
 
 
+def _erode_vn(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
+    """Erode boolean mask by 1 (Von Neumann). Keeps cells whose 4-neighbors stay inside.
+    If wrap=True, periodic; otherwise zero outside domain.
+    """
+    if wrap:
+        up = cp.roll(mask, -1, axis=0)
+        down = cp.roll(mask, 1, axis=0)
+        left = cp.roll(mask, 1, axis=1)
+        right = cp.roll(mask, -1, axis=1)
+    else:
+        H, W = mask.shape
+        up = cp.zeros_like(mask); up[1:, :] = mask[:-1, :]
+        down = cp.zeros_like(mask); down[:-1, :] = mask[1:, :]
+        left = cp.zeros_like(mask); left[:, 1:] = mask[:, :-1]
+        right = cp.zeros_like(mask); right[:, :-1] = mask[:, 1:]
+    return mask & up & down & left & right
+
+
 def _hysteresis_mask(g: cp.ndarray, frac_high: float, frac_low: float, prev: cp.ndarray | None) -> cp.ndarray:
     frac_high = max(0.0, min(1.0, float(frac_high)))
     frac_low = max(0.0, min(frac_high, float(frac_low)))
@@ -166,7 +184,8 @@ def main():
     L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
     g1 = _grad_mag(u1)
     refine1_mid = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, None)
-    refine1_mid = refine1_mid & L1_mask
+    # Enforce grading: L2 must be at least one mid-cell away from L1 boundary
+    refine1_mid = refine1_mid & _erode_vn(L1_mask, wrap=(args.bc == 'wrap'))
     L2_mask = _prolong_repeat(refine1_mid.astype(cp.uint8), R).astype(cp.bool_)
 
     # Plot setup
@@ -268,7 +287,8 @@ def main():
             # L1 -> L2 (gated inside L1)
             g1 = _grad_mag(u1)
             refine1_mid_new = _hysteresis_mask(g1, args.refine_frac, args.refine_frac * args.hysteresis, refine1_mid)
-            refine1_mid_new = refine1_mid_new & L1_mask_new
+            # Enforce grading again with the updated L1
+            refine1_mid_new = refine1_mid_new & _erode_vn(L1_mask_new, wrap=(args.bc == 'wrap'))
 
             # Transfers L2<->L1
             leaving2 = refine1_mid & (~refine1_mid_new)
@@ -322,4 +342,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
