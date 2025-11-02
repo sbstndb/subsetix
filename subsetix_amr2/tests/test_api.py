@@ -40,7 +40,13 @@ class TwoLevelAPITest(unittest.TestCase):
         self.cp.testing.assert_array_equal(u.coarse, self.cp.full((4, 4), 2.0, dtype=u.coarse.dtype))
         self.cp.testing.assert_array_equal(v.coarse, self.cp.full((4, 4), 1.0, dtype=v.coarse.dtype))
 
+    def test_scalar_field_as_arrays(self) -> None:
+        mesh = TwoLevelMesh(Box((0.0, 0.0), (1.0, 1.0)), 0, 1, coarse_resolution=2)
+        field = make_scalar_field("u", mesh)
+        coarse, fine = field.as_arrays()
+        self.assertIs(coarse, field.coarse)
+        self.assertIs(fine, field.fine)
+
 
 if __name__ == "__main__":
     unittest.main()
-

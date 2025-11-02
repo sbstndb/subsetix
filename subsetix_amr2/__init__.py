@@ -20,10 +20,11 @@ from .fields import (
 from .export import save_two_level_vtk
 from .api import Box, MRAdaptor, TwoLevelMesh, make_scalar_field
 from .runner import (
+    OutputOptions,
     SimulationArgs,
     build_mesh,
     parse_simulation_args,
-    run_two_level_advection,
+    run_two_level_simulation,
     save_snapshot,
     update_ghost,
 )
@@ -52,10 +53,11 @@ __all__ = [
     "TwoLevelMesh",
     "make_scalar_field",
     "MRAdaptor",
+    "OutputOptions",
     "SimulationArgs",
     "parse_simulation_args",
     "build_mesh",
-    "run_two_level_advection",
+    "run_two_level_simulation",
     "save_snapshot",
     "update_ghost",
     "AMR2Simulation",

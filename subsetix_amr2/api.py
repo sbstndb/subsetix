@@ -97,6 +97,11 @@ class ScalarField:
         self.coarse, other.coarse = other.coarse, self.coarse
         self.fine, other.fine = other.fine, self.fine
 
+    def as_arrays(self) -> tuple[cp.ndarray, cp.ndarray]:
+        """Return the coarse and fine arrays (no copy)."""
+
+        return self.coarse, self.fine
+
 
 def make_scalar_field(name: str, mesh: TwoLevelMesh, *, dtype: cp.dtype = cp.float32) -> ScalarField:
     return ScalarField(name, mesh, dtype=dtype)

@@ -19,6 +19,18 @@ from .fields import synchronize_two_level
 
 
 @dataclass(frozen=True)
+class OutputOptions:
+    directory: Path
+    prefix: str = "amr2"
+    every: int = 10
+    ghost_halo: int = 1
+
+    def __post_init__(self) -> None:
+        if self.every <= 0:
+            raise ValueError("OutputOptions.every must be > 0")
+
+
+@dataclass(frozen=True)
 class SimulationArgs:
     """
     Parameters controlling a two-level advection run.
@@ -35,12 +47,8 @@ class SimulationArgs:
     refine_fraction: float = 0.1
     grading: int = 1
     grading_mode: str = "von_neumann"
-    output_dir: Path = Path(".")
-    filename: str = "amr2"
-    nfiles: int = 1
-    ghost_halo: int = 1
+    output: OutputOptions | None = None
     bc: str = "clamp"
-    restart_file: Path | None = None
 
 
 def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
@@ -61,19 +69,26 @@ def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
         choices=["von_neumann", "moore"],
         default="von_neumann",
     )
-    parser.add_argument("--path", dest="output_dir", type=Path, default=Path.cwd())
-    parser.add_argument("--filename", type=str, default="amr2")
-    parser.add_argument("--nfiles", type=int, default=1)
-    parser.add_argument("--ghost-halo", type=int, default=1)
     parser.add_argument(
         "--bc",
         type=str,
         choices=["clamp", "wrap"],
         default="clamp",
     )
-    parser.add_argument("--restart-file", type=Path, default=None)
+    parser.add_argument("--vtk-dir", type=Path, default=None, help="Directory for VTK outputs")
+    parser.add_argument("--vtk-prefix", type=str, default="amr2")
+    parser.add_argument("--vtk-every", type=int, default=10)
+    parser.add_argument("--ghost-halo", type=int, default=1)
 
     ns = parser.parse_args(argv)
+    output: OutputOptions | None = None
+    if ns.vtk_dir is not None:
+        output = OutputOptions(
+            directory=Path(ns.vtk_dir),
+            prefix=str(ns.vtk_prefix),
+            every=int(ns.vtk_every),
+            ghost_halo=int(ns.ghost_halo),
+        )
     args = SimulationArgs(
         min_corner=(float(ns.min_corner[0]), float(ns.min_corner[1])),
         max_corner=(float(ns.max_corner[0]), float(ns.max_corner[1])),
@@ -86,12 +101,8 @@ def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
         refine_fraction=float(ns.refine_frac),
         grading=int(ns.grading),
         grading_mode=ns.grading_mode,
-        output_dir=Path(ns.output_dir),
-        filename=str(ns.filename),
-        nfiles=int(ns.nfiles),
-        ghost_halo=int(ns.ghost_halo),
+        output=output,
         bc=ns.bc,
-        restart_file=Path(ns.restart_file) if ns.restart_file is not None else None,
     )
     _validate_args(args)
     return args
@@ -102,23 +113,20 @@ def _validate_args(args: SimulationArgs) -> None:
         raise ValueError("two-level driver expects max_level = min_level + 1")
     if args.tf < args.t0:
         raise ValueError("tf must be >= t0")
-    if args.nfiles < 0:
-        raise ValueError("nfiles must be >= 0")
 
 
 def build_mesh(args: SimulationArgs, ratio: int = 2) -> TwoLevelMesh:
     base_resolution = 1 << args.min_level
-    mesh = TwoLevelMesh(
+    return TwoLevelMesh(
         Box(args.min_corner, args.max_corner),
         0,
         1,
         ratio=ratio,
         coarse_resolution=base_resolution,
     )
-    return mesh
 
 
-def update_ghost(field) -> None:
+def update_ghost(field: ScalarField) -> None:
     geometry = field.mesh.geometry
     if geometry is None:
         raise RuntimeError("mesh geometry not initialised")
@@ -151,47 +159,41 @@ def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: fl
 
 
 def save_snapshot(
-    args: SimulationArgs,
+    output: OutputOptions,
     mesh: TwoLevelMesh,
-    field,
+    field: ScalarField,
     step: int,
     *,
     time_value: float,
+    bc: str,
 ) -> None:
-    if args.nfiles == 0:
-        return
     geometry = mesh.geometry
     if geometry is None:
         raise RuntimeError("mesh geometry not initialised")
     save_two_level_vtk(
-        os.fspath(args.output_dir),
-        args.filename,
+        os.fspath(output.directory),
+        output.prefix,
         step,
         coarse_field=field.coarse,
         fine_field=field.fine,
         refine_mask=geometry.refine_mask,
         coarse_only_mask=geometry.coarse_only_mask,
         fine_mask=geometry.fine_mask,
-        dx_coarse=(args.max_corner[0] - args.min_corner[0]) / geometry.width,
-        dy_coarse=(args.max_corner[1] - args.min_corner[1]) / geometry.height,
+        dx_coarse=(mesh.box.max_corner[0] - mesh.box.min_corner[0]) / geometry.width,
+        dy_coarse=(mesh.box.max_corner[1] - mesh.box.min_corner[1]) / geometry.height,
         ratio=mesh.ratio,
         time_value=time_value,
-        ghost_halo=args.ghost_halo,
-        bc=args.bc,
+        ghost_halo=output.ghost_halo,
+        bc=bc,
     )
 
 
-def run_two_level_advection(
+def run_two_level_simulation(
     args: SimulationArgs,
     init_fn: Callable[[ScalarField], None],
 ) -> None:
     mesh = build_mesh(args)
-    geometry = mesh.geometry
-    assert geometry is not None
-
     field = make_scalar_field("u", mesh)
-    if args.restart_file is not None:
-        raise NotImplementedError("restart loading not implemented")
     init_fn(field)
     update_ghost(field)
 
@@ -203,6 +205,8 @@ def run_two_level_advection(
     )
     adaptor()
 
+    geometry = mesh.geometry
+    assert geometry is not None
     a, b = args.velocity
     dx0 = (args.max_corner[0] - args.min_corner[0]) / geometry.width
     dy0 = (args.max_corner[1] - args.min_corner[1]) / geometry.height
@@ -213,12 +217,13 @@ def run_two_level_advection(
     if not math.isfinite(dt) or dt <= 0.0:
         raise ValueError("invalid CFL configuration (dt <= 0)")
 
-    save_snapshot(args, mesh, field, 0, time_value=args.t0)
+    if args.output is not None:
+        args.output.directory.mkdir(parents=True, exist_ok=True)
+        save_snapshot(args.output, mesh, field, 0, time_value=args.t0, bc=args.bc)
 
     unp1 = make_scalar_field("unp1", mesh)
     t = args.t0
     step = 0
-    next_output_time = args.t0 + ((args.tf - args.t0) / args.nfiles if args.nfiles > 0 else math.inf)
     while t < args.tf:
         adaptor()
         dt_step = min(dt, args.tf - t)
@@ -231,6 +236,5 @@ def run_two_level_advection(
 
         t = min(args.tf, t + dt_step)
         step += 1
-        if args.nfiles > 0 and (t >= next_output_time or math.isclose(t, args.tf)):
-            save_snapshot(args, mesh, field, step, time_value=t)
-            next_output_time += (args.tf - args.t0) / args.nfiles if args.nfiles > 0 else math.inf
+        if args.output is not None and (step % args.output.every == 0 or math.isclose(t, args.tf)):
+            save_snapshot(args.output, mesh, field, step, time_value=t, bc=args.bc)
