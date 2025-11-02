@@ -120,10 +120,14 @@ def main():
     ap.add_argument(
         "--ic",
         type=str,
-        choices=["gauss", "sharp", "disk"],
+        choices=["gauss", "sharp", "disk", "square", "ring", "edge"],
         default="gauss",
-        help="Initial condition: smooth gaussians (gauss), sharper peaks (sharp), or binary disks (disk)",
+        help=(
+            "Initial condition: gauss (smooth), sharp (narrow peaks), disk (binary disks), "
+            "square (binary squares), ring (thin annulus), edge (diagonal step)"
+        ),
     )
+    ap.add_argument("--ic-amp", type=float, default=1.0, help="Scale factor for initial condition amplitude")
     args = ap.parse_args()
 
     W = H = int(args.coarse)
@@ -151,13 +155,39 @@ def main():
         g2 = cp.exp(-((X - 0.70) ** 2 + (Y - 0.30) ** 2) / (2 * 0.035**2))
         ridge = cp.maximum(0.0, 1.0 - 60.0 * (Y - 0.5) ** 2)
         u0 = (1.2 * g1 + 1.0 * g2 + 0.25 * ridge).astype(cp.float32, copy=False)
-    else:  # disk
+    elif args.ic == "disk":
         xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
         yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
         X, Y = cp.meshgrid(xx, yy)
         d1 = ((X - 0.35) ** 2 + (Y - 0.6) ** 2) <= (0.12 ** 2)
         d2 = ((X - 0.68) ** 2 + (Y - 0.32) ** 2) <= (0.10 ** 2)
         u0 = (d1 | d2).astype(cp.float32)
+    elif args.ic == "square":
+        xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
+        yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
+        X, Y = cp.meshgrid(xx, yy)
+        s1 = (cp.abs(X - 0.30) <= 0.10) & (cp.abs(Y - 0.65) <= 0.10)
+        s2 = (cp.abs(X - 0.70) <= 0.10) & (cp.abs(Y - 0.30) <= 0.12)
+        u0 = (s1 | s2).astype(cp.float32)
+    elif args.ic == "ring":
+        xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
+        yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
+        X, Y = cp.meshgrid(xx, yy)
+        r1 = cp.sqrt((X - 0.35) ** 2 + (Y - 0.60) ** 2)
+        r2 = cp.sqrt((X - 0.70) ** 2 + (Y - 0.30) ** 2)
+        ring1 = (r1 >= 0.10) & (r1 <= 0.12)
+        ring2 = (r2 >= 0.08) & (r2 <= 0.10)
+        u0 = (ring1 | ring2).astype(cp.float32)
+    else:  # edge
+        xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
+        yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
+        X, Y = cp.meshgrid(xx, yy)
+        # Diagonal Heaviside: sharp interface along a line
+        u0 = (X + Y < 0.9).astype(cp.float32)
+
+    # Apply amplitude scale
+    if args.ic_amp != 1.0:
+        u0 = (args.ic_amp * u0).astype(cp.float32, copy=False)
     u1 = _prolong_repeat(u0, R)  # init fine as prolongation of coarse
 
     # Initial refine mask from gradient on coarse (no hysteresis on first step)
