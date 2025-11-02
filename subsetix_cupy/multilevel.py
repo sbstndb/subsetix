@@ -451,6 +451,21 @@ def restrict_field(field: IntervalField, ratio: int, *, reducer: str = "mean") -
     if fine_interval_indices.size != expected:
         raise ValueError("interval mapping mismatch for restriction")
 
+    coarse_begin = coarse_set.begin.astype(cp.int32, copy=False)
+    coarse_end = coarse_set.end.astype(cp.int32, copy=False)
+    fine_begin = fine_set.begin.astype(cp.int32, copy=False)
+    fine_end = fine_set.end.astype(cp.int32, copy=False)
+
+    expected_begin = cp.repeat(coarse_begin * ratio_int, ratio_int)
+    expected_end = cp.repeat(coarse_end * ratio_int, ratio_int)
+    actual_begin = fine_begin[fine_interval_indices]
+    actual_end = fine_end[fine_interval_indices]
+
+    if int(cp.any(actual_begin != expected_begin).item()) or int(
+        cp.any(actual_end != expected_end).item()
+    ):
+        raise ValueError("fine field is not aligned with coarse geometry for restriction")
+
     coarse_offsets = coarse_field.interval_cell_offsets.astype(cp.int32, copy=False)
     fine_offsets = field.interval_cell_offsets.astype(cp.int32, copy=False)
 
