@@ -181,6 +181,102 @@ def square_grid_interval_set(
     return build_interval_set(offsets, begins, ends)
 
 
+def staircase_interval_set(
+    cp,
+    *,
+    spec: GeometrySpec,
+    reference: IntervalSet | None = None,
+    steps: int = 8,
+) -> IntervalSet:
+    """
+    Build an IntervalSet shaped as a staircase while preserving the reference span.
+
+    If ``reference`` is provided, each active row is shifted horizontally while
+    keeping the same number of intervals and cell counts; otherwise a square
+    patch covering ``spec.fill_ratio`` of the domain is used as the baseline.
+    """
+
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+
+    base = reference or square_grid_interval_set(cp, spec=spec)
+    begin_host = base.begin.get()
+    end_host = base.end.get()
+    offsets_host = base.row_offsets.get()
+
+    rows = spec.rows
+    width = spec.width
+    begins: List[int] = []
+    ends: List[int] = []
+    offsets: List[int] = [0]
+
+    active_rows: List[int] = []
+    row_spans: List[int] = []
+    per_row_intervals: List[int] = []
+
+    for row in range(rows):
+        start = offsets_host[row]
+        stop = offsets_host[row + 1]
+        count = stop - start
+        per_row_intervals.append(count)
+        if count == 0:
+            continue
+        active_rows.append(row)
+        row_start = begin_host[start]
+        row_end = end_host[stop - 1]
+        span = row_end - row_start
+        row_spans.append(span)
+
+    if not active_rows:
+        return base
+
+    max_span = max(row_spans)
+    available = max(0, width - max_span)
+    step_count = min(steps, max(1, available + 1))
+    active_count = len(active_rows)
+    step_height = max(1, active_count // step_count)
+    if step_height == 0:
+        step_height = 1
+    step_stride = max(1, available // max(1, step_count - 1)) if step_count > 1 else 0
+
+    row_to_index = {row: idx for idx, row in enumerate(active_rows)}
+
+    for row in range(rows):
+        start = offsets_host[row]
+        stop = offsets_host[row + 1]
+        count = per_row_intervals[row]
+        if count == 0:
+            offsets.append(len(begins))
+            continue
+
+        first_begin = begin_host[start]
+        last_end = end_host[stop - 1]
+        span = last_end - first_begin
+        max_shift = max(0, width - span)
+        pos = row_to_index[row]
+        level = pos // step_height
+        shift = level * step_stride
+        if shift > max_shift:
+            shift = max_shift
+
+        for idx in range(start, stop):
+            rel_begin = begin_host[idx] - first_begin
+            rel_end = end_host[idx] - first_begin
+            new_begin = int(shift + rel_begin)
+            new_end = int(shift + rel_end)
+            if new_end > width:
+                delta = new_end - width
+                new_begin -= delta
+                new_end -= delta
+                if new_begin < 0:
+                    new_begin = 0
+            begins.append(new_begin)
+            ends.append(new_end)
+        offsets.append(len(begins))
+
+    return build_interval_set(offsets, begins, ends)
+
+
 def random_interval_field(
     cp,
     interval_set: IntervalSet,
@@ -263,6 +359,7 @@ __all__ = [
     "random_interval_set",
     "random_interval_field",
     "square_grid_interval_set",
+    "staircase_interval_set",
     "deterministic_interval_field",
     "make_workspace",
     "ensure_directory",

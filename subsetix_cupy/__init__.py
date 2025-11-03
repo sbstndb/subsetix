@@ -13,7 +13,7 @@ from .expressions import (
     make_symmetric_difference,
     make_union,
 )
-from .interval_field import IntervalField, create_interval_field, get_cell, set_cell
+from .interval_field import IntervalField, create_interval_field, get_cell, set_cell, interval_field_to_dense
 from .multilevel import (
     MultiLevel2D,
     MultiLevelField2D,
@@ -34,6 +34,12 @@ from .morphology import (
     full_interval_set,
     ghost_zones,
 )
+from .interval_stencil import (
+    step_upwind_interval,
+    step_upwind_interval_field,
+    step_upwind_dense_zero,
+    step_upwind_dense_active,
+)
 
 __all__ = [
     "Expr",
@@ -51,6 +57,7 @@ __all__ = [
     "create_interval_field",
     "get_cell",
     "set_cell",
+    "interval_field_to_dense",
     "MultiLevel2D",
     "MultiLevelField2D",
     "prolong_set",
@@ -67,4 +74,8 @@ __all__ = [
     "erode_interval_set",
     "ghost_zones",
     "full_interval_set",
+    "step_upwind_interval",
+    "step_upwind_interval_field",
+    "step_upwind_dense_zero",
+    "step_upwind_dense_active",
 ]
