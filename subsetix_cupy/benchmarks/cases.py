@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import tempfile
-from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 from .. import (
@@ -21,18 +19,6 @@ from .. import (
     restrict_level_sets,
     restrict_set,
 )
-from ..demo_advection2d_amr3 import (
-    _dilate_mo,
-    _dilate_vn,
-    _erode_mo,
-    _grad_mag,
-    _hysteresis_mask,
-    _init_condition,
-    _prolong_repeat,
-    _restrict_mean,
-    _step_upwind,
-)
-from ..export_vtk import save_amr3_mesh_vtu, save_amr3_step_vtr, write_pvd
 from ..morphology import dilate_interval_set, erode_interval_set, ghost_zones
 from ..multilevel import coarse_only, covered_by_fine
 from ..expressions import _require_cupy
@@ -40,7 +26,6 @@ from . import BenchmarkCase, BenchmarkTarget
 from .utils import (
     GeometrySpec,
     deterministic_interval_field,
-    ensure_directory,
     make_workspace,
     square_grid_interval_set,
 )
@@ -48,23 +33,10 @@ from .utils import (
 SMALL_SPEC = GeometrySpec(rows=256, width=256, tiles_x=3, tiles_y=3, fill_ratio=0.8)
 LARGE_SPEC = GeometrySpec(rows=8192, width=8192, tiles_x=3, tiles_y=3, fill_ratio=0.8)
 RATIO = 2
-AMR_SMALL_COARSE = SMALL_SPEC.width // (RATIO ** 2)
-AMR_LARGE_COARSE = LARGE_SPEC.width // (RATIO ** 2)
 
 
 def _shift_cells(spec: GeometrySpec, frac_x: float = 0.0, frac_y: float = 0.0) -> Tuple[int, int]:
     return int(round(spec.width * frac_x)), int(round(spec.rows * frac_y))
-
-
-def _count_mask_intervals(mask) -> int:
-    cp = _require_cupy()
-    if mask.size == 0:
-        return 0
-    mask_i8 = mask.astype(cp.int8, copy=False)
-    starts = cp.count_nonzero(mask_i8[:, :1])
-    diffs = cp.diff(mask_i8, axis=1)
-    transitions = cp.count_nonzero(diffs == 1)
-    return int((starts + transitions).item())
 
 
 def _build_expression_case(
@@ -249,283 +221,6 @@ def _build_multilevel_case(name: str, description: str, spec: GeometrySpec, op: 
     )
 
 
-@dataclass
-class _AMRState:
-    u0_base: any
-    u1_base: any
-    u2_base: any
-    refine0: any
-    L1_mask: any
-    refine1_mid: any
-    L2_mask: any
-    R: int
-    dx0: float
-    dy0: float
-    dx1: float
-    dy1: float
-    dx2: float
-    dy2: float
-    a: float
-    b: float
-
-
-def _prepare_amr_state(
-    *,
-    coarse: int = 96,
-    ratio: int = 2,
-    refine_frac: float = 0.10,
-    hysteresis: float = 0.0,
-) -> _AMRState:
-    cp = _require_cupy()
-    W = H = coarse
-    R = ratio
-    u0 = _init_condition(W, H, kind="square")
-    u1 = _prolong_repeat(u0, R)
-    u2 = _prolong_repeat(u1, R)
-
-    g0 = _grad_mag(u0)
-    refine0 = _hysteresis_mask(g0, refine_frac, refine_frac * hysteresis, None)
-
-    L1_mask_base = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
-    L1_expanded = L1_mask_base
-    L1_expanded = _dilate_mo(L1_expanded, wrap=False)
-    coarse_force = L1_expanded.reshape(H, R, W, R).any(axis=(1, 3))
-    refine0 = refine0 | coarse_force
-    L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
-
-    g1 = _grad_mag(u1)
-    refine1_mid = _hysteresis_mask(g1, refine_frac, refine_frac * hysteresis, None)
-    L1_for_gating = _erode_mo(L1_mask, wrap=False)
-    refine1_mid = refine1_mid & L1_for_gating
-
-    coarse_force_l1 = refine1_mid.reshape(H, R, W, R).any(axis=(1, 3))
-    refine0 = refine0 | coarse_force_l1
-    L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
-    L2_mask = _prolong_repeat(refine1_mid.astype(cp.uint8), R).astype(cp.bool_)
-
-    dx0 = dy0 = 1.0 / W
-    dx1 = dy1 = dx0 / R
-    dx2 = dy2 = dx1 / R
-
-    return _AMRState(
-        u0_base=u0,
-        u1_base=u1,
-        u2_base=u2,
-        refine0=refine0,
-        L1_mask=L1_mask,
-        refine1_mid=refine1_mid,
-        L2_mask=L2_mask,
-        R=R,
-        dx0=dx0,
-        dy0=dy0,
-        dx1=dx1,
-        dy1=dy1,
-        dx2=dx2,
-        dy2=dy2,
-        a=0.6,
-        b=0.6,
-    )
-
-
-def _build_amr_compute_case(name: str, coarse: int) -> BenchmarkCase:
-    cp = _require_cupy()
-    state = _prepare_amr_state(coarse=coarse, ratio=RATIO)
-
-    u0_work = cp.empty_like(state.u0_base)
-    u1_work = cp.empty_like(state.u1_base)
-    u2_work = cp.empty_like(state.u2_base)
-    u0_pad = cp.empty_like(state.u0_base)
-    u1_pad = cp.empty_like(state.u1_base)
-    u2_pad = cp.empty_like(state.u2_base)
-
-    def _target():
-        cp.copyto(u0_work, state.u0_base)
-        cp.copyto(u1_work, state.u1_base)
-        cp.copyto(u2_work, state.u2_base)
-
-        coarse_if = _dilate_mo(state.refine0, wrap=False) & (~state.refine0)
-        mid_if = _dilate_mo(state.refine1_mid, wrap=False) & (~state.refine1_mid)
-
-        u1_restr = _restrict_mean(u1_work, state.R)
-        cp.copyto(u0_pad, u0_work)
-        u0_pad[state.refine0] = u1_restr[state.refine0]
-        u0_pad[coarse_if] = u1_restr[coarse_if]
-
-        u2_restr = _restrict_mean(u2_work, state.R)
-        cp.copyto(u1_pad, u1_work)
-        u1_pad[~state.L1_mask] = _prolong_repeat(u0_work, state.R)[~state.L1_mask]
-        u1_pad[mid_if] = u2_restr[mid_if]
-
-        cp.copyto(u2_pad, u2_work)
-        u2_pad[~state.L2_mask] = _prolong_repeat(u1_work, state.R)[~state.L2_mask]
-
-        _step_upwind(u0_pad, state.a, state.b, 0.000868, state.dx0, state.dy0, "clamp")
-        _step_upwind(u1_pad, state.a, state.b, 0.000868, state.dx1, state.dy1, "clamp")
-        _step_upwind(u2_pad, state.a, state.b, 0.000868, state.dx2, state.dy2, "clamp")
-
-    total_intervals = (
-        _count_mask_intervals(state.refine0)
-        + _count_mask_intervals(state.refine1_mid)
-        + _count_mask_intervals(state.L2_mask)
-    )
-
-    metadata = {
-        "coarse": state.u0_base.shape,
-        "ratio": state.R,
-        "input_intervals": total_intervals,
-        "operation": "compute_step",
-    }
-
-    return BenchmarkCase(
-        name=name,
-        description="AMR 3-level halo + upwind compute (single step, clamp BC)",
-        setup=lambda _cp: BenchmarkTarget(func=_target, repeat=40, warmup=5, metadata=metadata),
-    )
-
-
-def _build_amr_regrid_case(name: str, coarse: int) -> BenchmarkCase:
-    cp = _require_cupy()
-    state = _prepare_amr_state(coarse=coarse, ratio=RATIO)
-    base_intervals = (
-        _count_mask_intervals(state.refine0)
-        + _count_mask_intervals(state.refine1_mid)
-        + _count_mask_intervals(state.L2_mask)
-    )
-
-    def _target():
-        u0 = state.u0_base.copy()
-        u1 = state.u1_base.copy()
-        u2 = state.u2_base.copy()
-        refine0 = state.refine0.copy()
-        refine1_mid = state.refine1_mid.copy()
-        L1_mask = state.L1_mask.copy()
-
-        g0 = _grad_mag(u0)
-        refine0_new = _hysteresis_mask(g0, 0.10, 0.0, refine0)
-        L1_mask_new_base = _prolong_repeat(refine0_new.astype(cp.uint8), state.R).astype(cp.bool_)
-        L1_ring_new = _dilate_mo(L1_mask_new_base, wrap=False)
-        coarse_force_from_ring = L1_ring_new.reshape(
-            u0.shape[0], state.R, u0.shape[1], state.R
-        ).any(axis=(1, 3))
-        refine0_new = refine0_new | coarse_force_from_ring
-        L1_mask_new = _prolong_repeat(refine0_new.astype(cp.uint8), state.R).astype(cp.bool_)
-
-        g1 = _grad_mag(u1)
-        refine1_mid_new = _hysteresis_mask(g1, 0.10, 0.0, refine1_mid)
-        L1_for_gating_new = _erode_mo(L1_mask_new, wrap=False)
-        refine1_mid_new = refine1_mid_new & L1_for_gating_new
-
-        coarse_force_l1_new = refine1_mid_new.reshape(
-            u0.shape[0], state.R, u0.shape[1], state.R
-        ).any(axis=(1, 3))
-        refine0_new = refine0_new | coarse_force_l1_new
-        L1_mask_new = _prolong_repeat(refine0_new.astype(cp.uint8), state.R).astype(cp.bool_)
-
-        leaving2 = refine1_mid & (~refine1_mid_new)
-        if int(leaving2.any()):
-            u2_restr_now = _restrict_mean(u2, state.R)
-            u1 = u1.copy()
-            u1[leaving2] = u2_restr_now[leaving2]
-
-        entering2 = (~refine1_mid) & refine1_mid_new
-        if int(entering2.any()):
-            u1_prol_now = _prolong_repeat(u1, state.R)
-            L2_enter_f = _prolong_repeat(entering2.astype(cp.uint8), state.R).astype(cp.bool_)
-            u2 = u2.copy()
-            u2[L2_enter_f] = u1_prol_now[L2_enter_f]
-
-        leaving1 = refine0 & (~refine0_new)
-        if int(leaving1.any()):
-            u1_restr_now = _restrict_mean(u1, state.R)
-            u0 = u0.copy()
-            u0[leaving1] = u1_restr_now[leaving1]
-
-        entering1 = (~refine0) & refine0_new
-        if int(entering1.any()):
-            u0_prol_now = _prolong_repeat(u0, state.R)
-            L1_enter_f = _prolong_repeat(entering1.astype(cp.uint8), state.R).astype(cp.bool_)
-            u1 = u1.copy()
-            u1[L1_enter_f] = u0_prol_now[L1_enter_f]
-
-    metadata = {
-        "coarse": state.u0_base.shape,
-        "ratio": state.R,
-        "input_intervals": base_intervals,
-        "operation": "regrid_step",
-    }
-    return BenchmarkCase(
-        name=name,
-        description="AMR 3-level regridding (thresholds + transfers)",
-        setup=lambda _cp: BenchmarkTarget(func=_target, repeat=20, warmup=5, metadata=metadata),
-    )
-
-
-def _build_export_case(name: str, coarse: int) -> BenchmarkCase:
-    cp = _require_cupy()
-    state = _prepare_amr_state(coarse=coarse, ratio=RATIO)
-    tmpdir = tempfile.TemporaryDirectory()
-    ensure_directory(tmpdir.name)
-    counter = {"step": 0}
-
-    def _target():
-        step = counter["step"]
-        rels, entry = save_amr3_step_vtr(
-            tmpdir.name,
-            "bench",
-            step,
-            time_value=float(step),
-            u0=state.u0_base,
-            u1=state.u1_base,
-            u2=state.u2_base,
-            refine0=state.refine0,
-            L1_mask=state.L1_mask,
-            refine1_mid=state.refine1_mid,
-            L2_mask=state.L2_mask,
-            dx0=state.dx0,
-            dy0=state.dy0,
-            dx1=state.dx1,
-            dy1=state.dy1,
-            dx2=state.dx2,
-            dy2=state.dy2,
-        )
-        save_amr3_mesh_vtu(
-            tmpdir.name,
-            "bench",
-            step,
-            u0=state.u0_base,
-            u1=state.u1_base,
-            u2=state.u2_base,
-            coarse_only=(~state.refine0),
-            mid_only=(state.L1_mask & (~state.refine1_mid)),
-            fine_active=state.L2_mask,
-            dx0=state.dx0,
-            dy0=state.dy0,
-            dx1=state.dx1,
-            dy1=state.dy1,
-            dx2=state.dx2,
-            dy2=state.dy2,
-        )
-        write_pvd(tmpdir.name + "/bench.pvd", [(float(step), rels + [f"bench_step{step:04d}_mesh.vtu"])])
-        counter["step"] += 1
-
-    metadata = {
-        "operation": "export_vtk",
-        "directory": tmpdir.name,
-        "coarse": state.u0_base.shape,
-        "ratio": state.R,
-        "input_intervals": (
-            _count_mask_intervals(state.refine0)
-            + _count_mask_intervals(state.refine1_mid)
-            + _count_mask_intervals(state.L2_mask)
-        ),
-    }
-    return BenchmarkCase(
-        name=name,
-        description="VTK export (Rectilinear + mesh) for AMR snapshot",
-        setup=lambda _cp: BenchmarkTarget(func=_target, repeat=5, warmup=1, metadata=metadata),
-    )
-
-
 _CASES: List[BenchmarkCase] = [
     _build_expression_case(
         name="expr_union_small",
@@ -688,26 +383,6 @@ _CASES: List[BenchmarkCase] = [
         description="Coarse-only derivation (large domain)",
         spec=LARGE_SPEC,
         op="coarse_only",
-    ),
-    _build_amr_compute_case(
-        name="amr_compute_small",
-        coarse=AMR_SMALL_COARSE,
-    ),
-    _build_amr_compute_case(
-        name="amr_compute_large",
-        coarse=AMR_LARGE_COARSE,
-    ),
-    _build_amr_regrid_case(
-        name="amr_regrid_small",
-        coarse=AMR_SMALL_COARSE,
-    ),
-    _build_amr_regrid_case(
-        name="amr_regrid_large",
-        coarse=AMR_LARGE_COARSE,
-    ),
-    _build_export_case(
-        name="export_vtk_small",
-        coarse=AMR_SMALL_COARSE,
     ),
 ]
 
