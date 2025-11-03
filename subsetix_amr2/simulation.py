@@ -14,6 +14,7 @@ from typing import Callable, Dict, Iterable, Sequence
 import math
 
 import cupy as cp
+import numpy as np
 
 from .export import save_two_level_vtk
 from .fields import ActionField, Action, prolong_coarse_to_fine, synchronize_two_level
@@ -339,6 +340,60 @@ class TwoLevelVTKExporter:
         )
 
 
+_UPWIND_CLAMP_KERNEL_SRC = r"""
+extern "C" __global__
+void upwind_clamp(const float* __restrict__ u,
+                  float* __restrict__ out,
+                  int width,
+                  int height,
+                  float a,
+                  float b,
+                  float dt,
+                  float dx,
+                  float dy)
+{
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    if (x >= width || y >= height) {
+        return;
+    }
+
+    int idx = y * width + x;
+    float center = u[idx];
+
+    int x_left = (x == 0) ? 0 : (x - 1);
+    int x_right = (x == width - 1) ? (width - 1) : (x + 1);
+    int y_down = (y == 0) ? 0 : (y - 1);
+    int y_up = (y == height - 1) ? (height - 1) : (y + 1);
+
+    float left = u[y * width + x_left];
+    float right = u[y * width + x_right];
+    float down = u[y_down * width + x];
+    float up = u[y_up * width + x];
+
+    float du_dx = (a >= 0.0f)
+        ? (center - left) / dx
+        : (right - center) / dx;
+    float du_dy = (b >= 0.0f)
+        ? (center - down) / dy
+        : (up - center) / dy;
+
+    out[idx] = center - dt * (a * du_dx + b * du_dy);
+}
+""";
+
+_UPWIND_CLAMP_KERNEL = None
+
+
+def _get_upwind_clamp_kernel():
+    global _UPWIND_CLAMP_KERNEL
+    if _UPWIND_CLAMP_KERNEL is None:
+        _UPWIND_CLAMP_KERNEL = cp.RawKernel(
+            _UPWIND_CLAMP_KERNEL_SRC, "upwind_clamp", options=("--std=c++11",)
+        )
+    return _UPWIND_CLAMP_KERNEL
+
+
 def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: float, bc: str) -> cp.ndarray:
     if bc == "wrap":
         left = cp.roll(u, 1, axis=1)
@@ -349,23 +404,31 @@ def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: fl
         du_dy = (u - down) / dy if b >= 0 else (up - u) / dy
         return u - dt * (a * du_dx + b * du_dy)
 
-    du_dx = cp.empty_like(u)
-    if a >= 0:
-        du_dx[:, 1:] = (u[:, 1:] - u[:, :-1]) / dx
-        du_dx[:, 0] = 0.0
-    else:
-        du_dx[:, :-1] = (u[:, 1:] - u[:, :-1]) / dx
-        du_dx[:, -1] = 0.0
-
-    du_dy = cp.empty_like(u)
-    if b >= 0:
-        du_dy[1:, :] = (u[1:, :] - u[:-1, :]) / dy
-        du_dy[0, :] = 0.0
-    else:
-        du_dy[:-1, :] = (u[1:, :] - u[:-1, :]) / dy
-        du_dy[-1, :] = 0.0
-
-    return u - dt * (a * du_dx + b * du_dy)
+    kernel = _get_upwind_clamp_kernel()
+    u32 = u.astype(cp.float32, copy=False)
+    height, width = u32.shape
+    out = cp.empty_like(u32)
+    block = (32, 8)
+    grid = (
+        (width + block[0] - 1) // block[0],
+        (height + block[1] - 1) // block[1],
+    )
+    kernel(
+        grid,
+        block,
+        (
+            u32,
+            out,
+            np.int32(width),
+            np.int32(height),
+            np.float32(a),
+            np.float32(b),
+            np.float32(dt),
+            np.float32(dx),
+            np.float32(dy),
+        ),
+    )
+    return out
 
 
 _DEFAULT_SQUARES: list[SquareSpec] = [
