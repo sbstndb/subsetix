@@ -98,10 +98,6 @@ class SimulationStats:
     step: int
     time: float
     dt: float
-    refined_cells: int
-    refined_fraction: float
-    coarse_norm: float
-    fine_norm: float
     dx_coarse: float
     dy_coarse: float
     ratio: int
@@ -271,19 +267,10 @@ class AMR2Simulation:
 
     def _build_stats(self, *, step: int) -> SimulationStats:
         state = self._require_state()
-        refined_cells = int(state.actions.refine_mask().sum().item())
-        total_cells = self.width * self.height
-        refined_fraction = refined_cells / total_cells if total_cells else 0.0
-        coarse_norm = float(cp.linalg.norm(state.coarse).item())
-        fine_norm = float(cp.linalg.norm(state.fine).item())
         return SimulationStats(
             step=step,
             time=self.current_time,
             dt=self.dt,
-            refined_cells=refined_cells,
-            refined_fraction=refined_fraction,
-            coarse_norm=coarse_norm,
-            fine_norm=fine_norm,
             dx_coarse=self.dx_coarse,
             dy_coarse=self.dy_coarse,
             ratio=self.config.ratio,

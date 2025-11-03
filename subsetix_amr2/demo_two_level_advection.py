@@ -67,12 +67,7 @@ def run_demo(args: argparse.Namespace):
         if not args.verbose:
             return
         if stats.step > 0 and stats.step % args.print_every == 0:
-            print(
-                f"[step {stats.step:04d}] "
-                f"refine cells={stats.refined_cells} ({stats.refined_fraction:.2%}), "
-                f"||u_coarse||={stats.coarse_norm:.4f}, "
-                f"||u_fine||={stats.fine_norm:.4f}"
-            )
+            print(f"[step {stats.step:04d}] t={stats.time:.6f}")
 
     listeners = [_verbose_listener]
 
