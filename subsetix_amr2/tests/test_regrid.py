@@ -1,9 +1,12 @@
 import unittest
 
+from subsetix_amr2.geometry import interval_set_to_mask
 from subsetix_amr2.regrid import (
     enforce_two_level_grading,
+    enforce_two_level_grading_set,
     gradient_magnitude,
     gradient_tag,
+    gradient_tag_set,
 )
 from subsetix_cupy.expressions import _REAL_CUPY
 
@@ -28,6 +31,10 @@ class RegridTest(unittest.TestCase):
         self.assertFalse(mask[1, 1])
         self.assertFalse(mask[0, 0])
 
+        tagged_set = gradient_tag_set(data, frac_high=0.5)
+        mask_from_set = interval_set_to_mask(tagged_set, data.shape[1])
+        self.cp.testing.assert_array_equal(mask_from_set, mask)
+
     def test_gradient_tag_all_zero(self) -> None:
         data = self.cp.zeros((4, 4), dtype=self.cp.float32)
         mask = gradient_tag(data, frac_high=0.2)
@@ -50,10 +57,32 @@ class RegridTest(unittest.TestCase):
         expected_cross[2, 3] = True
         self.cp.testing.assert_array_equal(graded_vn, expected_cross)
 
+        graded_vn_set = enforce_two_level_grading_set(
+            gradient_tag_set(mask.astype(self.cp.float32), frac_high=1.0),
+            padding=1,
+            mode="von_neumann",
+            width=mask.shape[1],
+            height=mask.shape[0],
+        )
+        self.cp.testing.assert_array_equal(
+            interval_set_to_mask(graded_vn_set, mask.shape[1]), expected_cross
+        )
+
         graded_moore = enforce_two_level_grading(mask, padding=1, mode="moore")
         expected_square = self.cp.zeros_like(mask)
         expected_square[1:4, 1:4] = True
         self.cp.testing.assert_array_equal(graded_moore, expected_square)
+
+        graded_moore_set = enforce_two_level_grading_set(
+            gradient_tag_set(mask.astype(self.cp.float32), frac_high=1.0),
+            padding=1,
+            mode="moore",
+            width=mask.shape[1],
+            height=mask.shape[0],
+        )
+        self.cp.testing.assert_array_equal(
+            interval_set_to_mask(graded_moore_set, mask.shape[1]), expected_square
+        )
 
     def test_enforce_grading_padding_zero(self) -> None:
         mask = self.cp.zeros((4, 4), dtype=self.cp.bool_)

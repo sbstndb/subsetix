@@ -10,7 +10,9 @@ from .geometry import TwoLevelGeometry, mask_to_interval_set, interval_set_to_ma
 from .regrid import (
     gradient_magnitude,
     gradient_tag,
+    gradient_tag_set,
     enforce_two_level_grading,
+    enforce_two_level_grading_set,
 )
 from .fields import (
     prolong_coarse_to_fine,
@@ -44,7 +46,9 @@ __all__ = [
     "interval_set_to_mask",
     "gradient_magnitude",
     "gradient_tag",
+    "gradient_tag_set",
     "enforce_two_level_grading",
+    "enforce_two_level_grading_set",
     "prolong_coarse_to_fine",
     "restrict_fine_to_coarse",
     "synchronize_two_level",

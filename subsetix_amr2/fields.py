@@ -26,6 +26,7 @@ _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
 )
 
 _COPY_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
+_FILL_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 
 
 def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
@@ -99,6 +100,64 @@ def _copy_intervals_into(dst: cp.ndarray, src: cp.ndarray, interval_set: Interva
     kernel(grid, (block,), (row_ids, interval_set.begin, interval_set.end, src, dst, width))
 
 
+def _get_fill_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
+    key = cp.dtype(dtype).str
+    kernel = _FILL_KERNEL_CACHE.get(key)
+    if kernel is not None:
+        return kernel
+    if dtype == cp.int8:
+        type_name = "signed char"
+    elif dtype == cp.int32:
+        type_name = "int"
+    elif dtype == cp.int64:
+        type_name = "long long"
+    elif dtype == cp.float32:
+        type_name = "float"
+    elif dtype == cp.float64:
+        type_name = "double"
+    else:
+        raise TypeError(f"unsupported dtype for interval fill: {dtype}")
+    code = f"""
+    extern "C" __global__
+    void fill_intervals_2d(const int* __restrict__ row_ids,
+                           const int* __restrict__ begin,
+                           const int* __restrict__ end,
+                           {type_name} value,
+                           {type_name}* __restrict__ dst,
+                           int width)
+    {{
+        int interval = blockIdx.x;
+        int row = row_ids[interval];
+        int start = begin[interval];
+        int stop = end[interval];
+        if (stop <= start) {{
+            return;
+        }}
+        int base = row * width;
+        for (int col = start + threadIdx.x; col < stop; col += blockDim.x) {{
+            dst[base + col] = value;
+        }}
+    }}
+    """
+    kernel = cp.RawKernel(code, "fill_intervals_2d", options=("--std=c++11",))
+    _FILL_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
+def _fill_intervals(array: cp.ndarray, interval_set: IntervalSet, value) -> None:
+    if array.ndim != 2:
+        raise ValueError("array must be 2D")
+    interval_count = int(interval_set.begin.size)
+    if interval_count == 0:
+        return
+    row_ids = _interval_row_ids(interval_set)
+    kernel = _get_fill_intervals_kernel(array.dtype)
+    block = 128
+    grid = (interval_count,)
+    width = int(array.shape[1])
+    kernel(grid, (block,), (row_ids, interval_set.begin, interval_set.end, array.dtype.type(value), array, width))
+
+
 class Action(IntEnum):
     COARSEN = -1
     KEEP = 0
@@ -156,6 +215,15 @@ class ActionField:
         dense = self.dense()
         dense.fill(int(Action.KEEP))
         dense[refine_mask] = int(Action.REFINE)
+        self._mark_dirty()
+
+    def set_from_interval_set(self, refine_set: IntervalSet) -> None:
+        """Populate the action field directly from an IntervalSet."""
+
+        dense = self.dense()
+        dense.fill(int(Action.KEEP))
+        if refine_set.begin.size != 0:
+            _fill_intervals(dense, refine_set, int(Action.REFINE))
         self._mark_dirty()
 
     def _mark_dirty(self) -> None:

@@ -16,8 +16,13 @@ import cupy as cp
 
 from .export import save_two_level_vtk
 from .fields import ActionField, Action, prolong_coarse_to_fine, synchronize_two_level
-from .geometry import TwoLevelGeometry, interval_set_to_mask
-from .regrid import enforce_two_level_grading, gradient_magnitude, gradient_tag
+from .geometry import TwoLevelGeometry
+from .regrid import (
+    enforce_two_level_grading_set,
+    gradient_magnitude,
+    gradient_tag_set,
+)
+from subsetix_cupy.expressions import IntervalSet
 
 
 @dataclass(frozen=True)
@@ -158,9 +163,9 @@ class AMR2Simulation:
             raise ValueError(f"coarse_field must have shape {(self.height, self.width)}")
         coarse = coarse_field.astype(cp.float32, copy=False)
         fine = prolong_coarse_to_fine(coarse, self.config.ratio)
-        refine_mask = self._refine_from_gradient(coarse)
+        refine_set = self._refine_from_gradient(coarse)
         refine_field = ActionField.full_grid(self.height, self.width, self.config.ratio, default=Action.KEEP)
-        refine_field.set_from_mask(refine_mask)
+        refine_field.set_from_interval_set(refine_set)
         geometry = self._build_geometry(refine_field)
         self.state = AMRState(coarse=coarse, fine=fine, actions=refine_field, geometry=geometry)
         self.current_step = 0
@@ -225,15 +230,17 @@ class AMR2Simulation:
         for cb in callbacks:
             cb(state, stats)
 
-    def _refine_from_gradient(self, field: cp.ndarray) -> cp.ndarray:
+    def _refine_from_gradient(self, field: cp.ndarray) -> IntervalSet:
         grad = gradient_magnitude(field)
-        mask = gradient_tag(grad, self.config.refine_fraction)
-        graded = enforce_two_level_grading(
-            mask,
+        tagged = gradient_tag_set(grad, self.config.refine_fraction)
+        graded = enforce_two_level_grading_set(
+            tagged,
             padding=self.config.grading,
             mode=self.config.grading_mode,
+            width=self.width,
+            height=self.height,
         )
-        return graded.astype(cp.bool_, copy=False)
+        return graded
 
     def _build_geometry(self, actions: ActionField, workspace=None) -> TwoLevelGeometry:
         return TwoLevelGeometry.from_action_field(actions, workspace=workspace)
@@ -253,8 +260,8 @@ class AMR2Simulation:
 
     def _update_geometry(self) -> None:
         state = self._require_state()
-        refine_mask = self._refine_from_gradient(state.coarse)
-        state.actions.set_from_mask(refine_mask)
+        refine_set = self._refine_from_gradient(state.coarse)
+        state.actions.set_from_interval_set(refine_set)
         workspace = state.geometry.workspace if state.geometry is not None else None
         geometry = self._build_geometry(state.actions, workspace=workspace)
         state.geometry = geometry
