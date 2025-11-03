@@ -5,7 +5,7 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Any, Dict, Tuple
 
-_CACHE: Dict[int, Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]] = {}
+_CACHE: Dict[int, Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]] = {}
 
 
 _COUNT_SRC = dedent(
@@ -236,6 +236,198 @@ _WRITE_SRC = dedent(
 )
 
 
+_VERTICAL_DILATE_COUNT_CLAMP_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void vertical_dilate_count_clamp(const int* begin,
+                                     const int* end,
+                                     const int* row_offsets,
+                                     int row_count,
+                                     int halo,
+                                     int* counts)
+    {
+        int row = blockDim.x * blockIdx.x + threadIdx.x;
+        if (row >= row_count) {
+            return;
+        }
+
+        const int MAX_NEIGHBORS = 64;
+
+        int start_row = row - halo;
+        if (start_row < 0) {
+            start_row = 0;
+        }
+        int stop_row = row + halo + 1;
+        if (stop_row > row_count) {
+            stop_row = row_count;
+        }
+        int neighbor_count = stop_row - start_row;
+        if (neighbor_count <= 0) {
+            counts[row] = 0;
+            return;
+        }
+        if (neighbor_count > MAX_NEIGHBORS) {
+            counts[row] = 0;
+            return;
+        }
+
+        int ptrs[MAX_NEIGHBORS];
+        int limits[MAX_NEIGHBORS];
+        for (int n = 0; n < neighbor_count; ++n) {
+            int row_idx = start_row + n;
+            ptrs[n] = row_offsets[row_idx];
+            limits[n] = row_offsets[row_idx + 1];
+        }
+
+        bool has_active = false;
+        int active_begin = 0;
+        int active_end = 0;
+        int total = 0;
+
+        while (true) {
+            int best = -1;
+            int best_begin = 0;
+            for (int n = 0; n < neighbor_count; ++n) {
+                int p = ptrs[n];
+                if (p < limits[n]) {
+                    int candidate = begin[p];
+                    if (best == -1 || candidate < best_begin) {
+                        best = n;
+                        best_begin = candidate;
+                    }
+                }
+            }
+            if (best == -1) {
+                break;
+            }
+
+            int seg_begin = begin[ptrs[best]];
+            int seg_end = end[ptrs[best]];
+            ptrs[best] += 1;
+
+            if (!has_active) {
+                has_active = true;
+                active_begin = seg_begin;
+                active_end = seg_end;
+                continue;
+            }
+
+            if (seg_begin <= active_end) {
+                if (seg_end > active_end) {
+                    active_end = seg_end;
+                }
+            } else {
+                ++total;
+                active_begin = seg_begin;
+                active_end = seg_end;
+            }
+        }
+
+        if (has_active) {
+            ++total;
+        }
+
+        counts[row] = total;
+    }
+    """
+)
+
+
+_VERTICAL_DILATE_WRITE_CLAMP_SRC = dedent(
+    r"""
+    extern "C" __global__
+    void vertical_dilate_write_clamp(const int* begin,
+                                     const int* end,
+                                     const int* row_offsets,
+                                     const int* out_offsets,
+                                     int row_count,
+                                     int halo,
+                                     int* out_begin,
+                                     int* out_end)
+    {
+        int row = blockDim.x * blockIdx.x + threadIdx.x;
+        if (row >= row_count) {
+            return;
+        }
+
+        const int MAX_NEIGHBORS = 64;
+
+        int start_row = row - halo;
+        if (start_row < 0) {
+            start_row = 0;
+        }
+        int stop_row = row + halo + 1;
+        if (stop_row > row_count) {
+            stop_row = row_count;
+        }
+        int neighbor_count = stop_row - start_row;
+        if (neighbor_count <= 0 || neighbor_count > MAX_NEIGHBORS) {
+            return;
+        }
+
+        int ptrs[MAX_NEIGHBORS];
+        int limits[MAX_NEIGHBORS];
+        for (int n = 0; n < neighbor_count; ++n) {
+            int row_idx = start_row + n;
+            ptrs[n] = row_offsets[row_idx];
+            limits[n] = row_offsets[row_idx + 1];
+        }
+
+        int write_pos = out_offsets[row];
+        bool has_active = false;
+        int active_begin = 0;
+        int active_end = 0;
+
+        while (true) {
+            int best = -1;
+            int best_begin = 0;
+            for (int n = 0; n < neighbor_count; ++n) {
+                int p = ptrs[n];
+                if (p < limits[n]) {
+                    int candidate = begin[p];
+                    if (best == -1 || candidate < best_begin) {
+                        best = n;
+                        best_begin = candidate;
+                    }
+                }
+            }
+            if (best == -1) {
+                break;
+            }
+
+            int seg_begin = begin[ptrs[best]];
+            int seg_end = end[ptrs[best]];
+            ptrs[best] += 1;
+
+            if (!has_active) {
+                has_active = true;
+                active_begin = seg_begin;
+                active_end = seg_end;
+                continue;
+            }
+
+            if (seg_begin <= active_end) {
+                if (seg_end > active_end) {
+                    active_end = seg_end;
+                }
+            } else {
+                out_begin[write_pos] = active_begin;
+                out_end[write_pos] = active_end;
+                ++write_pos;
+                active_begin = seg_begin;
+                active_end = seg_end;
+            }
+        }
+
+        if (has_active) {
+            out_begin[write_pos] = active_begin;
+            out_end[write_pos] = active_end;
+        }
+    }
+    """
+)
+
+
 def get_kernels(cp_module):
     """
     Compile and cache the RawKernels for the provided CuPy module instance.
@@ -275,6 +467,16 @@ def get_kernels(cp_module):
     restrict_f64_kernel = cp_module.RawKernel(
         _RESTRICT_FIELD_F64_SRC, "restrict_field_f64", options=("--std=c++11",)
     )
+    vertical_count_kernel = cp_module.RawKernel(
+        _VERTICAL_DILATE_COUNT_CLAMP_SRC,
+        "vertical_dilate_count_clamp",
+        options=("--std=c++11",),
+    )
+    vertical_write_kernel = cp_module.RawKernel(
+        _VERTICAL_DILATE_WRITE_CLAMP_SRC,
+        "vertical_dilate_write_clamp",
+        options=("--std=c++11",),
+    )
     _CACHE[key] = (
         count_kernel,
         write_kernel,
@@ -285,6 +487,8 @@ def get_kernels(cp_module):
         prolong_f64_kernel,
         restrict_f32_kernel,
         restrict_f64_kernel,
+        vertical_count_kernel,
+        vertical_write_kernel,
     )
     return _CACHE[key]
 

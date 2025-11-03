@@ -92,6 +92,18 @@ class MorphologyTest(unittest.TestCase):
         rows = _rows_to_python(dilated, self.cp)
         self.assertEqual(rows[0], [(0, 6)])
 
+    def test_vertical_clamp_collects_neighbor_rows(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 2, 4, 4],
+            begin=[2, 4, 1, 3],
+            end=[3, 5, 2, 4],
+        )
+        dilated = dilate_interval_set(base, halo_x=0, halo_y=1, width=8, height=3, bc="clamp")
+        rows = _rows_to_python(dilated, self.cp)
+        self.assertEqual(rows[0], [(1, 5)])
+        self.assertEqual(rows[1], [(1, 5)])
+        self.assertEqual(rows[2], [(1, 2), (3, 4)])
+
 
 if __name__ == "__main__":
     unittest.main()

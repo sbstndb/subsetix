@@ -297,6 +297,94 @@ def _dilate_interval_set_generic(
     return _clone_interval_set(dilated)
 
 
+def _dilate_interval_set_vertical_clamp(
+    interval_set: IntervalSet,
+    *,
+    halo_y: int,
+    width: int,
+    height: int,
+) -> IntervalSet:
+    cp = _require_cupy()
+
+    if halo_y == 0:
+        return _clone_interval_set(interval_set)
+
+    max_neighbors = 2 * halo_y + 1
+    if max_neighbors > 64:
+        return _dilate_interval_set_generic(
+            interval_set,
+            halo_x=0,
+            halo_y=halo_y,
+            width=width,
+            height=height,
+            bc="clamp",
+        )
+
+    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
+    row_count = int(row_offsets.size - 1)
+    if row_count != height:
+        raise ValueError("interval_set row count must match provided height")
+
+    if row_count == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(1, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+
+    begin = interval_set.begin.astype(cp.int32, copy=False)
+    end = interval_set.end.astype(cp.int32, copy=False)
+
+    kernels = get_kernels(cp)
+    vertical_count_kernel = kernels[9]
+    vertical_write_kernel = kernels[10]
+
+    block = 128
+    grid = (row_count + block - 1) // block if row_count > 0 else 1
+
+    counts = cp.empty(row_count, dtype=cp.int32)
+    vertical_count_kernel(
+        (grid,),
+        (block,),
+        (
+            begin,
+            end,
+            row_offsets,
+            np.int32(row_count),
+            np.int32(halo_y),
+            counts,
+        ),
+    )
+
+    out_offsets = cp.empty(row_count + 1, dtype=cp.int32)
+    out_offsets[0] = 0
+    if row_count > 0:
+        cp.cumsum(counts, dtype=cp.int32, out=out_offsets[1:])
+
+    total = int(out_offsets[-1].item()) if row_count > 0 else 0
+    if total == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=out_offsets)
+
+    out_begin = cp.empty(total, dtype=cp.int32)
+    out_end = cp.empty(total, dtype=cp.int32)
+
+    vertical_write_kernel(
+        (grid,),
+        (block,),
+        (
+            begin,
+            end,
+            row_offsets,
+            out_offsets,
+            np.int32(row_count),
+            np.int32(halo_y),
+            out_begin,
+            out_end,
+        ),
+    )
+
+    return IntervalSet(begin=out_begin, end=out_end, row_offsets=out_offsets)
+
+
 def dilate_interval_set(
     interval_set: IntervalSet,
     halo_x: int = 1,
@@ -349,22 +437,22 @@ def dilate_interval_set(
         return _clone_interval_set(interval_set)
 
     if bc == "clamp":
-        horizontal = _dilate_interval_set_horizontal_clamp(
-            interval_set,
-            halo_x=halo_x,
-            width=width,
-            row_count=row_count,
-        )
-        if halo_y == 0:
-            return horizontal
-        return _dilate_interval_set_generic(
-            horizontal,
-            halo_x=0,
-            halo_y=halo_y,
-            width=width,
-            height=height,
-            bc=bc,
-        )
+        current = interval_set
+        if halo_x > 0:
+            current = _dilate_interval_set_horizontal_clamp(
+                current,
+                halo_x=halo_x,
+                width=width,
+                row_count=row_count,
+            )
+        if halo_y > 0:
+            current = _dilate_interval_set_vertical_clamp(
+                current,
+                halo_y=halo_y,
+                width=width,
+                height=height,
+            )
+        return current
 
     return _dilate_interval_set_generic(
         interval_set,
