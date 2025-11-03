@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import cupy as cp
 
@@ -16,6 +16,9 @@ from subsetix_cupy import (
     prolong_set,
 )
 from subsetix_cupy.expressions import _require_cupy
+
+if TYPE_CHECKING:
+    from .fields import ActionField
 from subsetix_cupy.plot_utils import intervals_to_mask as _intervals_to_mask_np
 
 
@@ -96,6 +99,33 @@ class TwoLevelGeometry:
     workspace: CuPyWorkspace
 
     @classmethod
+    def from_action_field(
+        cls,
+        actions: "ActionField",
+        *,
+        workspace: Optional[CuPyWorkspace] = None,
+    ) -> "TwoLevelGeometry":
+        if actions.height <= 0 or actions.width <= 0:
+            raise ValueError("action field must have positive dimensions")
+        workspace = workspace or CuPyWorkspace()
+        coarse_set = actions.coarse_interval_set()
+        refine_set = actions.refine_set()
+        fine_set = actions.fine_set()
+        coarse_only_expr = make_difference(make_input(coarse_set), make_input(refine_set))
+        coarse_only_set = evaluate(coarse_only_expr, workspace=workspace)
+
+        return cls(
+            ratio=int(actions.ratio),
+            width=actions.width,
+            height=actions.height,
+            coarse=coarse_set,
+            refine=refine_set,
+            fine=fine_set,
+            coarse_only=coarse_only_set,
+            workspace=workspace,
+        )
+
+    @classmethod
     def from_masks(
         cls,
         refine_mask: cp.ndarray,
@@ -160,6 +190,13 @@ class TwoLevelGeometry:
             coarse_mask=coarse_mask,
             workspace=self.workspace,
         )
+
+    def with_action_field(self, actions: "ActionField") -> "TwoLevelGeometry":
+        """
+        Return a new geometry based on an ActionField, sharing the workspace.
+        """
+
+        return TwoLevelGeometry.from_action_field(actions, workspace=self.workspace)
 
     @property
     def coarse_mask(self) -> cp.ndarray:

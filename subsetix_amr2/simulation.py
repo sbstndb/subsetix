@@ -15,7 +15,7 @@ from typing import Callable, Dict, Iterable, Sequence
 import cupy as cp
 
 from .export import save_two_level_vtk
-from .fields import MaskField, prolong_coarse_to_fine, synchronize_two_level
+from .fields import ActionField, Action, prolong_coarse_to_fine, synchronize_two_level
 from .geometry import TwoLevelGeometry, interval_set_to_mask
 from .regrid import enforce_two_level_grading, gradient_magnitude, gradient_tag
 
@@ -89,7 +89,7 @@ class SimulationConfig:
 class AMRState:
     coarse: cp.ndarray
     fine: cp.ndarray
-    refine: MaskField
+    actions: ActionField
     geometry: TwoLevelGeometry
 
 
@@ -163,9 +163,10 @@ class AMR2Simulation:
         coarse = coarse_field.astype(cp.float32, copy=False)
         fine = prolong_coarse_to_fine(coarse, self.config.ratio)
         refine_mask = self._refine_from_gradient(coarse)
-        refine_field = MaskField(refine_mask, ratio=self.config.ratio)
+        refine_field = ActionField.full_grid(self.height, self.width, self.config.ratio, default=Action.KEEP)
+        refine_field.set_from_mask(refine_mask)
         geometry = self._build_geometry(refine_field)
-        self.state = AMRState(coarse=coarse, fine=fine, refine=refine_field, geometry=geometry)
+        self.state = AMRState(coarse=coarse, fine=fine, actions=refine_field, geometry=geometry)
         self.current_step = 0
         self.current_time = 0.0
 
@@ -238,20 +239,15 @@ class AMR2Simulation:
         )
         return graded.astype(cp.bool_, copy=False)
 
-    def _build_geometry(self, refine_field: MaskField) -> TwoLevelGeometry:
-        coarse_mask = cp.ones_like(refine_field.coarse, dtype=cp.bool_)
-        return TwoLevelGeometry.from_masks(
-            refine_field.coarse,
-            ratio=self.config.ratio,
-            coarse_mask=coarse_mask,
-        )
+    def _build_geometry(self, actions: ActionField, workspace=None) -> TwoLevelGeometry:
+        return TwoLevelGeometry.from_action_field(actions, workspace=workspace)
 
     def _synchronize(self) -> None:
         state = self._require_state()
         coarse, fine = synchronize_two_level(
             state.coarse,
             state.fine,
-            state.refine,
+            state.actions,
             ratio=self.config.ratio,
             reducer="mean",
             fill_fine_outside=True,
@@ -262,8 +258,9 @@ class AMR2Simulation:
     def _update_geometry(self) -> None:
         state = self._require_state()
         refine_mask = self._refine_from_gradient(state.coarse)
-        state.refine.set_coarse(refine_mask)
-        geometry = self._build_geometry(state.refine)
+        state.actions.set_from_mask(refine_mask)
+        workspace = state.geometry.workspace if state.geometry is not None else None
+        geometry = self._build_geometry(state.actions, workspace=workspace)
         state.geometry = geometry
 
     def _advance(self) -> None:
@@ -274,7 +271,7 @@ class AMR2Simulation:
 
     def _build_stats(self, *, step: int) -> SimulationStats:
         state = self._require_state()
-        refined_cells = int(state.refine.coarse.sum().item())
+        refined_cells = int(state.actions.refine_mask().sum().item())
         total_cells = self.width * self.height
         refined_fraction = refined_cells / total_cells if total_cells else 0.0
         coarse_norm = float(cp.linalg.norm(state.coarse).item())
@@ -322,7 +319,7 @@ class TwoLevelVTKExporter:
             stats.step,
             coarse_field=state.coarse,
             fine_field=state.fine,
-            refine_mask=state.refine.coarse,
+            refine_mask=state.actions.refine_mask(),
             coarse_only_mask=state.geometry.coarse_only_mask,
             fine_mask=state.geometry.fine_mask,
             dx_coarse=stats.dx_coarse,

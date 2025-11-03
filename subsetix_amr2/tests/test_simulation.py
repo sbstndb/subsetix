@@ -29,8 +29,9 @@ class SimulationTest(unittest.TestCase):
         assert state is not None
         self.assertEqual(state.coarse.shape, (16, 16))
         self.assertEqual(state.fine.shape, (32, 32))
-        self.assertEqual(state.refine.coarse.shape, (16, 16))
-        self.assertEqual(state.refine.coarse.dtype, cp.bool_)
+        refine_mask = state.actions.refine_mask()
+        self.assertEqual(refine_mask.shape, (16, 16))
+        self.assertEqual(refine_mask.dtype, cp.bool_)
         self.assertEqual(state.geometry.ratio, config.ratio)
 
     def test_run_invokes_callbacks(self) -> None:
