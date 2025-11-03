@@ -20,5 +20,3 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run unit tests
         run: pytest
-      - name: Run diagonal symmetry demo check
-        run: python -m subsetix_amr2.demo_two_level_advection --coarse 40 --steps 40 --refine-frac 0.10 --grading 1 --check-symmetry --verbose

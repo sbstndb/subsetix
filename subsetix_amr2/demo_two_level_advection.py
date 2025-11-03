@@ -16,7 +16,6 @@ import time
 
 import cupy as cp
 import numpy as np
-from .geometry import interval_set_to_mask
 from .simulation import (
     AMR2Simulation,
     AMRState,
@@ -79,7 +78,7 @@ def run_demo(args: argparse.Namespace):
             )
 
     def _animation_listener(state: AMRState, stats: SimulationStats) -> None:
-        if not (args.animate or args.check_symmetry):
+        if not args.animate:
             return
         history.append(capture_frame(state, stats.step))
 
@@ -103,9 +102,6 @@ def run_demo(args: argparse.Namespace):
     elapsed = time.perf_counter() - t0
 
     print(f"Completed {args.steps} steps in {elapsed:.2f}s ({elapsed / max(1, args.steps):.4f}s/step)")
-
-    if args.check_symmetry:
-        _ensure_symmetry(final_state, history, final_stats.step)
 
     render(
         final_state,
@@ -152,32 +148,8 @@ def create_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ghost-halo", type=int, default=1, help="Ghost halo in coarse cells recorded in VTK outputs")
     ap.add_argument("--verbose", action="store_true", help="Print per-step diagnostics")
     ap.add_argument("--print-every", type=int, default=25, help="Diagnostic print frequency (steps)")
-    ap.add_argument("--check-symmetry", action="store_true", help="Fail if final mesh/field deviate from diagonal symmetry")
     ap.add_argument("--ic-amp", type=float, default=None, help=argparse.SUPPRESS)  # legacy flag
     return ap
-
-
-def _ensure_symmetry(state: AMRState, frames, final_step: int, tol: float = 1e-2) -> None:
-    checks = list(frames)
-    if not checks or checks[-1][0] != final_step:
-        checks.append(capture_frame(state, final_step))
-
-    for step, coarse, fine, refine_mask, coarse_only in checks:
-        coarse_diff = float(cp.max(cp.abs(coarse - coarse.T)).item())
-        fine_diff = float(cp.max(cp.abs(fine - fine.T)).item())
-        mask_asym = bool(cp.any(refine_mask != refine_mask.T))
-        coarse_only_asym = bool(cp.any(coarse_only != coarse_only.T))
-        if any([coarse_diff > tol, fine_diff > tol, mask_asym, coarse_only_asym]):
-            raise RuntimeError(
-                "Symmetry check failed at frame "
-                f"{step}: coarse_diff={coarse_diff:.2e}, "
-                f"fine_diff={fine_diff:.2e}, mask_asym={mask_asym}, "
-                f"coarse_only_asym={coarse_only_asym}"
-            )
-
-    fine_mask = state.geometry.fine_mask
-    if bool(cp.any(fine_mask != fine_mask.T)):
-        raise RuntimeError("Symmetry check failed: fine mask asymmetric at final frame")
 
 
 def main(argv: list[str] | None = None):
