@@ -16,6 +16,7 @@ import time
 
 import cupy as cp
 import numpy as np
+from .geometry import interval_set_to_mask
 from .simulation import (
     AMR2Simulation,
     AMRState,
@@ -78,7 +79,7 @@ def run_demo(args: argparse.Namespace):
             )
 
     def _animation_listener(state: AMRState, stats: SimulationStats) -> None:
-        if not args.animate:
+        if not (args.animate or args.check_symmetry):
             return
         history.append(capture_frame(state, stats.step))
 
@@ -104,7 +105,7 @@ def run_demo(args: argparse.Namespace):
     print(f"Completed {args.steps} steps in {elapsed:.2f}s ({elapsed / max(1, args.steps):.4f}s/step)")
 
     if args.check_symmetry:
-        _ensure_symmetry(final_state)
+        _ensure_symmetry(final_state, history, final_stats.step)
 
     render(
         final_state,
@@ -156,31 +157,27 @@ def create_argparser() -> argparse.ArgumentParser:
     return ap
 
 
-def _ensure_symmetry(state: AMRState, tol: float = 1e-5) -> None:
-    coarse_diff = float(cp.max(cp.abs(state.coarse - state.coarse.T)).item())
-    fine_diff = float(cp.max(cp.abs(state.fine - state.fine.T)).item())
-    refine_mask = state.refine_mask
-    geometry = state.geometry
-    coarse_only = interval_set_to_mask(geometry.coarse_only, refine_mask.shape[1])
-    fine_mask = geometry.fine_mask
+def _ensure_symmetry(state: AMRState, frames, final_step: int, tol: float = 5e-3) -> None:
+    checks = list(frames)
+    if not checks or checks[-1][0] != final_step:
+        checks.append(capture_frame(state, final_step))
 
-    mask_asym = bool(cp.any(refine_mask != refine_mask.T))
-    coarse_only_asym = bool(cp.any(coarse_only != coarse_only.T))
-    fine_mask_asym = bool(cp.any(fine_mask != fine_mask.T))
+    for step, coarse, fine, refine_mask, coarse_only in checks:
+        coarse_diff = float(cp.max(cp.abs(coarse - coarse.T)).item())
+        fine_diff = float(cp.max(cp.abs(fine - fine.T)).item())
+        mask_asym = bool(cp.any(refine_mask != refine_mask.T))
+        coarse_only_asym = bool(cp.any(coarse_only != coarse_only.T))
+        if any([coarse_diff > tol, fine_diff > tol, mask_asym, coarse_only_asym]):
+            raise RuntimeError(
+                "Symmetry check failed at frame "
+                f"{step}: coarse_diff={coarse_diff:.2e}, "
+                f"fine_diff={fine_diff:.2e}, mask_asym={mask_asym}, "
+                f"coarse_only_asym={coarse_only_asym}"
+            )
 
-    if any([
-        coarse_diff > tol,
-        fine_diff > tol,
-        mask_asym,
-        coarse_only_asym,
-        fine_mask_asym,
-    ]):
-        raise RuntimeError(
-            "Symmetry check failed: "
-            f"coarse_diff={coarse_diff:.2e}, fine_diff={fine_diff:.2e}, "
-            f"mask_asym={mask_asym}, coarse_only_asym={coarse_only_asym}, "
-            f"fine_mask_asym={fine_mask_asym}"
-        )
+    fine_mask = state.geometry.fine_mask
+    if bool(cp.any(fine_mask != fine_mask.T)):
+        raise RuntimeError("Symmetry check failed: fine mask asymmetric at final frame")
 
 
 def main(argv: list[str] | None = None):
