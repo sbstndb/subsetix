@@ -102,56 +102,125 @@ def _build_interval_set_from_rows(rows, begin, end, row_count: int) -> IntervalS
     return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets)
 
 
-def dilate_interval_set(
+def _dilate_interval_set_horizontal_clamp(
     interval_set: IntervalSet,
-    halo_x: int = 1,
-    halo_y: int = 1,
     *,
+    halo_x: int,
     width: int,
-    height: int | None = None,
-    bc: str = "clamp",
+    row_count: int,
 ) -> IntervalSet:
-    """
-    Dilate an interval set with optional wrap-around behaviour.
-
-    Parameters
-    ----------
-    interval_set : IntervalSet
-        Geometry to dilate.
-    halo_x, halo_y : int
-        Radius along x (columns) and y (rows).
-    width : int
-        Domain width.
-    height : int, optional
-        Domain height. Defaults to the row count of ``interval_set``.
-    bc : {"clamp", "wrap"}
-        Boundary condition along both axes. ``"wrap"`` performs toroidal wrap;
-        ``"clamp"`` clips at the domain edges.
-    """
-
-    if bc not in {"clamp", "wrap"}:
-        raise ValueError("bc must be 'clamp' or 'wrap'")
-    if halo_x < 0 or halo_y < 0:
-        raise ValueError("halo_x and halo_y must be non-negative")
-
     cp = _require_cupy()
+
+    if halo_x == 0:
+        return _clone_interval_set(interval_set)
+
+    base_begin = interval_set.begin.astype(cp.int32, copy=True)
+    base_end = interval_set.end.astype(cp.int32, copy=True)
+    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
+    row_ids = _row_ids(row_offsets)
+
+    begin_expanded = cp.maximum(base_begin - halo_x, 0)
+    end_expanded = cp.minimum(base_end + halo_x, width)
+    valid_mask = end_expanded > begin_expanded
+
+    if int(valid_mask.sum()) == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(row_count + 1, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+
+    rows_valid = row_ids[valid_mask]
+    begin_valid = begin_expanded[valid_mask]
+    end_valid = end_expanded[valid_mask]
+
+    if row_count == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(1, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+
+    counts = (
+        cp.bincount(rows_valid, minlength=row_count).astype(cp.int32, copy=False)
+        if rows_valid.size
+        else cp.zeros(row_count, dtype=cp.int32)
+    )
+
+    row_offsets_valid = cp.empty(row_count + 1, dtype=cp.int32)
+    row_offsets_valid[0] = 0
+    if row_count > 0:
+        cp.cumsum(counts, dtype=cp.int32, out=row_offsets_valid[1:])
+
+    total = int(row_offsets_valid[-1].item()) if row_count > 0 else 0
+    if total == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets_valid)
+
+    kernels = get_kernels(cp)
+    merge_count_kernel = kernels[3]
+    merge_write_kernel = kernels[4]
+
+    block = 128
+    grid = (row_count + block - 1) // block if row_count > 0 else 1
+
+    counts_out = cp.empty(row_count, dtype=cp.int32)
+    merge_count_kernel(
+        (grid,),
+        (block,),
+        (
+            begin_valid,
+            end_valid,
+            row_offsets_valid,
+            np.int32(row_count),
+            counts_out,
+        ),
+    )
+
+    out_offsets = cp.empty(row_count + 1, dtype=cp.int32)
+    out_offsets[0] = 0
+    if row_count > 0:
+        cp.cumsum(counts_out, dtype=cp.int32, out=out_offsets[1:])
+
+    total_out = int(out_offsets[-1].item()) if row_count > 0 else 0
+    if total_out == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=out_offsets)
+
+    out_begin = cp.empty(total_out, dtype=cp.int32)
+    out_end = cp.empty(total_out, dtype=cp.int32)
+
+    merge_write_kernel(
+        (grid,),
+        (block,),
+        (
+            begin_valid,
+            end_valid,
+            row_offsets_valid,
+            out_offsets,
+            np.int32(row_count),
+            out_begin,
+            out_end,
+        ),
+    )
+
+    return IntervalSet(begin=out_begin, end=out_end, row_offsets=out_offsets)
+
+
+def _dilate_interval_set_generic(
+    interval_set: IntervalSet,
+    *,
+    halo_x: int,
+    halo_y: int,
+    width: int,
+    height: int,
+    bc: str,
+) -> IntervalSet:
+    cp = _require_cupy()
+
     row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
     row_count = int(row_offsets.size - 1)
-    if height is None:
-        height = row_count
-    if row_count != height:
-        raise ValueError("interval_set row count must match provided height")
-
-    if width <= 0 or height <= 0:
-        raise ValueError("width and height must be positive")
 
     if interval_set.begin.size == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(height + 1, dtype=cp.int32)
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
-
-    if halo_x == 0 and halo_y == 0:
-        return _clone_interval_set(interval_set)
 
     base_rows = _row_ids(row_offsets)
     begin = interval_set.begin.astype(cp.int32, copy=True)
@@ -226,6 +295,85 @@ def dilate_interval_set(
 
     dilated = _build_interval_set_from_rows(rows_all, begin_all, end_all, height)
     return _clone_interval_set(dilated)
+
+
+def dilate_interval_set(
+    interval_set: IntervalSet,
+    halo_x: int = 1,
+    halo_y: int = 1,
+    *,
+    width: int,
+    height: int | None = None,
+    bc: str = "clamp",
+) -> IntervalSet:
+    """
+    Dilate an interval set with optional wrap-around behaviour.
+
+    Parameters
+    ----------
+    interval_set : IntervalSet
+        Geometry to dilate.
+    halo_x, halo_y : int
+        Radius along x (columns) and y (rows).
+    width : int
+        Domain width.
+    height : int, optional
+        Domain height. Defaults to the row count of ``interval_set``.
+    bc : {"clamp", "wrap"}
+        Boundary condition along both axes. ``"wrap"`` performs toroidal wrap;
+        ``"clamp"`` clips at the domain edges.
+    """
+
+    if bc not in {"clamp", "wrap"}:
+        raise ValueError("bc must be 'clamp' or 'wrap'")
+    if halo_x < 0 or halo_y < 0:
+        raise ValueError("halo_x and halo_y must be non-negative")
+
+    cp = _require_cupy()
+    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
+    row_count = int(row_offsets.size - 1)
+    if height is None:
+        height = row_count
+    if row_count != height:
+        raise ValueError("interval_set row count must match provided height")
+
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+
+    if interval_set.begin.size == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(height + 1, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+
+    if halo_x == 0 and halo_y == 0:
+        return _clone_interval_set(interval_set)
+
+    if bc == "clamp":
+        horizontal = _dilate_interval_set_horizontal_clamp(
+            interval_set,
+            halo_x=halo_x,
+            width=width,
+            row_count=row_count,
+        )
+        if halo_y == 0:
+            return horizontal
+        return _dilate_interval_set_generic(
+            horizontal,
+            halo_x=0,
+            halo_y=halo_y,
+            width=width,
+            height=height,
+            bc=bc,
+        )
+
+    return _dilate_interval_set_generic(
+        interval_set,
+        halo_x=halo_x,
+        halo_y=halo_y,
+        width=width,
+        height=height,
+        bc=bc,
+    )
 
 
 def ghost_zones(
