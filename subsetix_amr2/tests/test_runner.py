@@ -22,8 +22,8 @@ class RunnerTest(unittest.TestCase):
 
     def test_build_mesh_and_run(self) -> None:
         def init_fn(f):
-            f.coarse.fill(1.0)
-            f.fine.fill(1.0)
+            f.coarse_field.values.fill(1.0)
+            f.fine_field.values.fill(1.0)
 
         field = run_two_level_simulation(
             SimulationArgs(
@@ -40,7 +40,9 @@ class RunnerTest(unittest.TestCase):
             ),
             init_fn,
         )
-        coarse, _ = field.as_arrays()
+        geometry = field.mesh.geometry
+        assert geometry is not None
+        coarse = field.coarse_field.values.reshape(geometry.height, geometry.width)
         expected = self.cp.full(coarse.shape, 1.0, dtype=coarse.dtype)
         expected[:, 0] = 0.996
         self.cp.testing.assert_allclose(coarse, expected, atol=1e-7)

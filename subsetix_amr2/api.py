@@ -162,51 +162,6 @@ class ScalarField:
         if fine is not None:
             self.fine_field = fine
 
-    def to_dense(self, level: int, *, copy: bool = True) -> cp.ndarray:
-        """
-        Materialise the selected level as a dense array.
-
-        By default a copy is returned so external callers cannot mutate the
-        backing storage inadvertently. Internal routines can opt-in to a view
-        by passing ``copy=False``.
-        """
-
-        geometry = self.mesh.geometry
-        if geometry is None:
-            raise RuntimeError("mesh geometry not initialised")
-        ratio = self.mesh.ratio
-        if level == self.mesh.min_level:
-            height = geometry.height
-            width = geometry.width
-            data = self.coarse_field.values.reshape(height, width)
-        elif level == self.mesh.max_level:
-            height = geometry.height * ratio
-            width = geometry.width * ratio
-            data = self.fine_field.values.reshape(height, width)
-        else:
-            raise ValueError(f"unsupported level {level}")
-        return data.copy() if copy else data
-
-    def load_dense(self, level: int, data: cp.ndarray) -> None:
-        """
-        Copy values from a dense array into the interval-backed field.
-        """
-
-        if not isinstance(data, cp.ndarray):
-            raise TypeError("data must be a CuPy array")
-        view = self.to_dense(level, copy=False)
-        if data.shape != view.shape:
-            raise ValueError(f"dense data shape {data.shape} does not match level {level} shape {view.shape}")
-        cp.copyto(view, data.astype(self.dtype, copy=False))
-
-    def fill(self, level: int, value: float) -> None:
-        """
-        Set all cells at ``level`` to a constant value.
-        """
-
-        view = self.to_dense(level, copy=False)
-        view.fill(self.dtype.type(value) if hasattr(self.dtype, "type") else value)
-
     def resize(self) -> None:
         if self.mesh.geometry is None:
             raise RuntimeError("mesh geometry not initialised")
@@ -238,15 +193,20 @@ class MRAdaptor:
         self.mode = mode
 
     def __call__(self) -> None:
-        coarse = self.field.to_dense(self.mesh.min_level, copy=False)
+        geometry = self.mesh.geometry
+        if geometry is None:
+            raise RuntimeError("mesh geometry not initialised")
+        height = geometry.height
+        width = geometry.width
+        coarse = self.field.coarse_field.values.reshape(height, width)
         grad = gradient_magnitude(coarse)
         tags_set = gradient_tag_threshold_set(grad, self.refine_threshold)
         graded_set = enforce_two_level_grading_set(
             tags_set,
             padding=self.grading,
             mode=self.mode,
-            width=coarse.shape[1],
-            height=coarse.shape[0],
+            width=width,
+            height=height,
         )
         geometry = self.mesh.regrid(graded_set)
         ratio = self.mesh.ratio

@@ -50,16 +50,15 @@ class SymmetryTest(unittest.TestCase):
             res = 1 << args.min_level
             squares = [SquareSpec(center=(0.2, 0.2), half_width=(0.1, 0.1))]
             coarse_ifield = build_square_interval_field(res, res, squares, dtype=self.cp.float32)
-            coarse_dense = coarse_ifield.values.reshape(res, res)
-            field.load_dense(field.mesh.min_level, coarse_dense)
             fine_ifield = prolong_field(coarse_ifield, field.mesh.ratio)
-            fine_dense = fine_ifield.values.reshape(res * field.mesh.ratio, res * field.mesh.ratio)
-            field.load_dense(field.mesh.max_level, fine_dense)
+            field.set_interval_fields(coarse=coarse_ifield, fine=fine_ifield)
 
         field = run_two_level_simulation(args, init_fn)
 
-        coarse = field.to_dense(field.mesh.min_level)
-        fine = field.to_dense(field.mesh.max_level)
+        geometry = field.mesh.geometry
+        assert geometry is not None
+        coarse = field.coarse_field.values.reshape(geometry.height, geometry.width)
+        fine = field.fine_field.values.reshape(geometry.height * geometry.ratio, geometry.width * geometry.ratio)
         geom = field.mesh.geometry
         assert geom is not None
 
