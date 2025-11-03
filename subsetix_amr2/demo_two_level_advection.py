@@ -157,7 +157,7 @@ def create_argparser() -> argparse.ArgumentParser:
     return ap
 
 
-def _ensure_symmetry(state: AMRState, frames, final_step: int, tol: float = 5e-3) -> None:
+def _ensure_symmetry(state: AMRState, frames, final_step: int, tol: float = 1e-6) -> None:
     checks = list(frames)
     if not checks or checks[-1][0] != final_step:
         checks.append(capture_frame(state, final_step))

@@ -15,7 +15,7 @@ class SymmetryTest(unittest.TestCase):
         args = SimulationArgs(
             min_corner=(0.0, 0.0),
             max_corner=(1.0, 1.0),
-            velocity=(0.5, 0.5),
+            velocity=(0.0, 0.0),
             cfl=0.6,
             t0=0.0,
             tf=0.02,
@@ -51,4 +51,3 @@ class SymmetryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

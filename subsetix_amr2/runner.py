@@ -213,8 +213,11 @@ def run_two_level_simulation(
     dx1 = dx0 / mesh.ratio
     dy1 = dy0 / mesh.ratio
     denom = abs(a) / dx1 + abs(b) / dy1
-    dt = args.cfl / denom if denom > 0 else math.inf
-    if not math.isfinite(dt) or dt <= 0.0:
+    if denom > 0:
+        dt = args.cfl / denom
+    else:
+        dt = max(args.tf - args.t0, 0.0)
+    if dt <= 0.0:
         raise ValueError("invalid CFL configuration (dt <= 0)")
 
     if args.output is not None:
