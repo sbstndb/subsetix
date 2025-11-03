@@ -139,6 +139,7 @@ def update_ghost(field: ScalarField) -> None:
         ratio=field.mesh.ratio,
         reducer="mean",
         fill_fine_outside=True,
+        copy=False,
     )
     field.coarse = coarse
     field.fine = fine

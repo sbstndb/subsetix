@@ -269,6 +269,7 @@ class AMR2Simulation:
             ratio=self.config.ratio,
             reducer="mean",
             fill_fine_outside=True,
+            copy=False,
         )
         state.coarse = coarse
         state.fine = fine

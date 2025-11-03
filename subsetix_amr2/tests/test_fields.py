@@ -130,6 +130,35 @@ class FieldsTest(unittest.TestCase):
         self.assertEqual(coarse_updated.dtype, self.cp.float32)
         self.cp.testing.assert_array_equal(fine_updated, fine)
 
+    def test_synchronize_in_place(self) -> None:
+        coarse = self.cp.zeros((2, 2), dtype=self.cp.float32)
+        fine = self.cp.full((4, 4), 2.0, dtype=self.cp.float32)
+        refine = _make_interval_set(
+            self.cp,
+            2,
+            {
+                0: [(0, 1)],
+                1: [(0, 1)],
+            },
+        )
+        coarse_out, fine_out = synchronize_two_level(
+            coarse,
+            fine,
+            refine,
+            ratio=2,
+            reducer="mean",
+            fill_fine_outside=True,
+            copy=False,
+        )
+        self.assertIs(coarse_out, coarse)
+        self.assertIs(fine_out, fine)
+        expected_coarse = self.cp.array([[2.0, 0.0], [2.0, 0.0]], dtype=self.cp.float32)
+        self.cp.testing.assert_array_equal(coarse, expected_coarse)
+        # refined block remains 2.0, rest filled from coarse (zeros)
+        self.assertTrue(self.cp.all(fine[0:2, 0:2] == 2.0))
+        self.assertTrue(self.cp.all(fine[2:, :2] == 2.0))
+        self.assertTrue(self.cp.all(fine[:, 2:] == 0.0))
+
     def test_synchronize_height_mismatch(self) -> None:
         coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
         fine = self.cp.zeros((8, 8), dtype=self.cp.float32)
