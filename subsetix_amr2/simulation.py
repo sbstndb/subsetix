@@ -339,24 +339,32 @@ class TwoLevelVTKExporter:
         )
 
 
-def _neighbors(u: cp.ndarray, bc: str) -> tuple[cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]:
+def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: float, bc: str) -> cp.ndarray:
     if bc == "wrap":
         left = cp.roll(u, 1, axis=1)
         right = cp.roll(u, -1, axis=1)
         down = cp.roll(u, 1, axis=0)
         up = cp.roll(u, -1, axis=0)
+        du_dx = (u - left) / dx if a >= 0 else (right - u) / dx
+        du_dy = (u - down) / dy if b >= 0 else (up - u) / dy
+        return u - dt * (a * du_dx + b * du_dy)
+
+    du_dx = cp.empty_like(u)
+    if a >= 0:
+        du_dx[:, 1:] = (u[:, 1:] - u[:, :-1]) / dx
+        du_dx[:, 0] = 0.0
     else:
-        left = cp.concatenate([u[:, :1], u[:, :-1]], axis=1)
-        right = cp.concatenate([u[:, 1:], u[:, -1:]], axis=1)
-        down = cp.concatenate([u[:1, :], u[:-1, :]], axis=0)
-        up = cp.concatenate([u[1:, :], u[-1:, :]], axis=0)
-    return left, right, down, up
+        du_dx[:, :-1] = (u[:, 1:] - u[:, :-1]) / dx
+        du_dx[:, -1] = 0.0
 
+    du_dy = cp.empty_like(u)
+    if b >= 0:
+        du_dy[1:, :] = (u[1:, :] - u[:-1, :]) / dy
+        du_dy[0, :] = 0.0
+    else:
+        du_dy[:-1, :] = (u[1:, :] - u[:-1, :]) / dy
+        du_dy[-1, :] = 0.0
 
-def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: float, bc: str) -> cp.ndarray:
-    left, right, down, up = _neighbors(u, bc)
-    du_dx = (u - left) / dx if a >= 0 else (right - u) / dx
-    du_dy = (u - down) / dy if b >= 0 else (up - u) / dy
     return u - dt * (a * du_dx + b * du_dy)
 
 
