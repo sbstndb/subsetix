@@ -232,7 +232,7 @@ class IntervalFieldTest(unittest.TestCase):
 
     def test_empty_field_dtype_matches_fill(self) -> None:
         empty_set = build_interval_set(row_offsets=[0, 0], begin=[], end=[])
-        value = self.cp.float64(3.0)
+        value = self.cp.float32(3.0)
         field = create_interval_field(empty_set, fill_value=value)
         self.assertEqual(field.values.dtype, value.dtype)
         self.assertEqual(field.values.size, 0)

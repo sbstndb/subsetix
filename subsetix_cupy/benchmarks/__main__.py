@@ -68,7 +68,7 @@ def main(argv: List[str] | None = None) -> None:
     for case in cases:
         print(f"Running {case.name} …", end="", flush=True)
         result, metadata, repeat_used, warmup_used = run_case(case, repeat=args.repeat, warmup=args.warmup)
-        times = np.asarray(result.gpu_times, dtype=np.float64).reshape(-1)
+        times = np.asarray(result.gpu_times, dtype=np.float32).reshape(-1)
         avg_ms = float(times.mean() * 1e3) if times.size else 0.0
         std_ms = float(times.std(ddof=0) * 1e3) if times.size else 0.0
 
@@ -93,7 +93,7 @@ def main(argv: List[str] | None = None) -> None:
             "repeat": repeat_used,
             "warmup": warmup_used,
             "gpu_times": [float(t) for t in times],
-            "cpu_times": [float(t) for t in np.asarray(result.cpu_times, dtype=np.float64).reshape(-1)],
+            "cpu_times": [float(t) for t in np.asarray(result.cpu_times, dtype=np.float32).reshape(-1)],
             "metadata": metadata,
         }
         if input_intervals is not None:

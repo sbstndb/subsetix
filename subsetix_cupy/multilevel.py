@@ -345,12 +345,12 @@ def prolong_field(field: IntervalField, ratio: int) -> IntervalField:
         raise ValueError("ratio must be >= 1")
 
     fine_set, _ = _prolong_set_impl(field.interval_set, ratio)
-    fine_field = create_interval_field(fine_set, fill_value=0.0, dtype=field.values.dtype)
+    fine_field = create_interval_field(fine_set, fill_value=0.0, dtype=cp.float32)
 
     if fine_field.values.size == 0 or field.values.size == 0:
         return fine_field
     if ratio == 1:
-        fine_field.values[...] = field.values
+        fine_field.values[...] = field.values.astype(cp.float32, copy=False)
         return fine_field
 
     ratio_int = int(ratio)
@@ -366,54 +366,20 @@ def prolong_field(field: IntervalField, ratio: int) -> IntervalField:
     kernels = get_kernels(cp)
     block = 128
     grid = (int(interval_count),)
-    dtype = fine_field.values.dtype
-
-    if dtype == cp.float32:
-        kernels[5](
-            grid,
-            (block,),
-            (
-                coarse_offsets,
-                fine_offsets,
-                fine_interval_indices,
-                np.int32(ratio_int),
-                np.int32(interval_count),
-                field.values,
-                fine_field.values,
-            ),
-        )
-    elif dtype == cp.float64:
-        kernels[6](
-            grid,
-            (block,),
-            (
-                coarse_offsets,
-                fine_offsets,
-                fine_interval_indices,
-                np.int32(ratio_int),
-                np.int32(interval_count),
-                field.values,
-                fine_field.values,
-            ),
-        )
-    else:
-        # Fallback: cast through float32 to remain functional for uncommon dtypes.
-        tmp_in = field.values.astype(cp.float32, copy=False)
-        tmp_out = fine_field.values.astype(cp.float32, copy=False)
-        kernels[5](
-            grid,
-            (block,),
-            (
-                coarse_offsets,
-                fine_offsets,
-                fine_interval_indices,
-                np.int32(ratio_int),
-                np.int32(interval_count),
-                tmp_in,
-                tmp_out,
-            ),
-        )
-        fine_field.values[...] = tmp_out.astype(dtype, copy=False)
+    src_values = field.values.astype(cp.float32, copy=False)
+    kernels[5](
+        grid,
+        (block,),
+        (
+            coarse_offsets,
+            fine_offsets,
+            fine_interval_indices,
+            np.int32(ratio_int),
+            np.int32(interval_count),
+            src_values,
+            fine_field.values,
+        ),
+    )
 
     return fine_field
 
@@ -422,12 +388,7 @@ def restrict_field(field: IntervalField, ratio: int, *, reducer: str = "mean") -
     cp = _require_cupy()
     fine_set = field.interval_set
     coarse_set = restrict_set(fine_set, ratio)
-    base_dtype = cp.dtype(field.values.dtype)
-    if reducer == "mean":
-        target_dtype = cp.dtype(cp.result_type(base_dtype, cp.float32))
-    else:
-        target_dtype = base_dtype
-    coarse_field = create_interval_field(coarse_set, fill_value=0.0, dtype=target_dtype)
+    coarse_field = create_interval_field(coarse_set, fill_value=0.0, dtype=cp.float32)
     if field.values.size == 0 or coarse_field.values.size == 0:
         return coarse_field
 
@@ -474,62 +435,23 @@ def restrict_field(field: IntervalField, ratio: int, *, reducer: str = "mean") -
     grid = (int(interval_count),)
     samples = ratio_int * ratio_int
 
-    if coarse_field.values.dtype == cp.float32:
-        norm = np.float32(1.0 / samples if reducer_code == 0 else 1.0)
-        fine_values = field.values.astype(cp.float32, copy=False)
-        kernels[7](
-            grid,
-            (block,),
-            (
-                coarse_offsets,
-                fine_offsets,
-                fine_interval_indices,
-                np.int32(ratio_int),
-                np.int32(interval_count),
-                np.int32(reducer_code),
-                norm,
-                fine_values,
-                coarse_field.values,
-            ),
-        )
-    elif coarse_field.values.dtype == cp.float64:
-        norm = np.float64(1.0 / samples if reducer_code == 0 else 1.0)
-        fine_values = field.values.astype(cp.float64, copy=False)
-        kernels[8](
-            grid,
-            (block,),
-            (
-                coarse_offsets,
-                fine_offsets,
-                fine_interval_indices,
-                np.int32(ratio_int),
-                np.int32(interval_count),
-                np.int32(reducer_code),
-                norm,
-                fine_values,
-                coarse_field.values,
-            ),
-        )
-    else:
-        norm = np.float32(1.0 / samples if reducer_code == 0 else 1.0)
-        fine_values = field.values.astype(cp.float32, copy=False)
-        tmp = cp.empty_like(coarse_field.values, dtype=cp.float32)
-        kernels[7](
-            grid,
-            (block,),
-            (
-                coarse_offsets,
-                fine_offsets,
-                fine_interval_indices,
-                np.int32(ratio_int),
-                np.int32(interval_count),
-                np.int32(reducer_code),
-                norm,
-                fine_values,
-                tmp,
-            ),
-        )
-        coarse_field.values[...] = tmp.astype(coarse_field.values.dtype, copy=False)
+    norm = np.float32(1.0 / samples if reducer_code == 0 else 1.0)
+    fine_values = field.values.astype(cp.float32, copy=False)
+    kernels[7](
+        grid,
+        (block,),
+        (
+            coarse_offsets,
+            fine_offsets,
+            fine_interval_indices,
+            np.int32(ratio_int),
+            np.int32(interval_count),
+            np.int32(reducer_code),
+            norm,
+            fine_values,
+            coarse_field.values,
+        ),
+    )
 
     return coarse_field
 

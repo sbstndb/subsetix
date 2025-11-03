@@ -46,21 +46,6 @@ void prolong_dense_f32(const float* src, float* dst, int H, int W, int R)
 }
 """
 
-_PROLONG_F64_SRC = r"""
-extern "C" __global__
-void prolong_dense_f64(const double* src, double* dst, int H, int W, int R)
-{
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int HR = H * R;
-    int WR = W * R;
-    if (row >= HR || col >= WR) return;
-    int src_row = row / R;
-    int src_col = col / R;
-    dst[row * WR + col] = src[src_row * W + src_col];
-}
-"""
-
 _PROLONG_U8_SRC = r"""
 extern "C" __global__
 void prolong_dense_u8(const unsigned char* src, unsigned char* dst, int H, int W, int R)
@@ -99,29 +84,6 @@ void restrict_mean_f32(const float* src, float* dst, int H, int W, int R)
 }
 """
 
-_RESTRICT_F64_SRC = r"""
-extern "C" __global__
-void restrict_mean_f64(const double* src, double* dst, int H, int W, int R)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = H * W;
-    if (idx >= total) return;
-    int row = idx / W;
-    int col = idx % W;
-    int base_row = row * R;
-    int base_col = col * R;
-    int fine_w = W * R;
-    double sum = 0.0;
-    for (int dy = 0; dy < R; ++dy) {
-        int row_offset = (base_row + dy) * fine_w + base_col;
-        for (int dx = 0; dx < R; ++dx) {
-            sum += src[row_offset + dx];
-        }
-    }
-    dst[idx] = sum / (double)(R * R);
-}
-"""
-
 
 def _get_dense_kernel(kind: str, dtype: cp.dtype) -> cp.RawKernel:
     key = (kind, dtype)
@@ -132,23 +94,17 @@ def _get_dense_kernel(kind: str, dtype: cp.dtype) -> cp.RawKernel:
         if dtype == cp.float32:
             src = _PROLONG_F32_SRC
             name = "prolong_dense_f32"
-        elif dtype == cp.float64:
-            src = _PROLONG_F64_SRC
-            name = "prolong_dense_f64"
         elif dtype == cp.uint8:
             src = _PROLONG_U8_SRC
             name = "prolong_dense_u8"
         else:
-            raise TypeError(f"unsupported dtype {dtype} for prolong kernel")
+            raise TypeError("prolong kernel supports float32/uint8 only")
     elif kind == "restrict_mean":
         if dtype == cp.float32:
             src = _RESTRICT_F32_SRC
             name = "restrict_mean_f32"
-        elif dtype == cp.float64:
-            src = _RESTRICT_F64_SRC
-            name = "restrict_mean_f64"
         else:
-            raise TypeError(f"unsupported dtype {dtype} for restrict kernel")
+            raise TypeError("restrict kernel supports float32 only")
     else:
         raise ValueError(f"unknown kernel kind '{kind}'")
     kernel = cp.RawKernel(src, name, options=("--std=c++11",))
@@ -224,7 +180,7 @@ def _restrict_mean(u_f: cp.ndarray, R: int) -> cp.ndarray:
     W = Wf // R
     src = cp.ascontiguousarray(u_f)
     dtype = src.dtype
-    if dtype not in (cp.float32, cp.float64):
+    if dtype != cp.float32:
         src = src.astype(cp.float32)
         dtype = cp.float32
     dst = cp.empty((H, W), dtype=dtype)
@@ -256,7 +212,7 @@ def _prolong_repeat(u_c: cp.ndarray, R: int) -> cp.ndarray:
         src = src.astype(cp.uint8)
         dtype = cp.uint8
         needs_bool = True
-    elif dtype not in (cp.float32, cp.float64, cp.uint8):
+    elif dtype not in (cp.float32, cp.uint8):
         src = src.astype(cp.float32)
         dtype = cp.float32
     dst = cp.empty((H * R, W * R), dtype=dtype)

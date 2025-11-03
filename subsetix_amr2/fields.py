@@ -166,8 +166,6 @@ def _get_copy_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
         return kernel
     if dtype == cp.float32:
         type_name = "float"
-    elif dtype == cp.float64:
-        type_name = "double"
     elif dtype == cp.int32:
         type_name = "int"
     elif dtype == cp.int64:
@@ -175,7 +173,7 @@ def _get_copy_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
     elif dtype == cp.bool_:
         type_name = "bool"
     else:
-        raise TypeError(f"unsupported dtype for interval copy: {dtype}")
+        raise TypeError("interval copy expects float32/int/bool data")
     code = f"""
     extern "C" __global__
     void copy_intervals_2d(const int* __restrict__ row_ids,
@@ -234,10 +232,8 @@ def _get_fill_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
         type_name = "long long"
     elif dtype == cp.float32:
         type_name = "float"
-    elif dtype == cp.float64:
-        type_name = "double"
     else:
-        raise TypeError(f"unsupported dtype for interval fill: {dtype}")
+        raise TypeError("interval fill expects float32/int data")
     code = f"""
     extern "C" __global__
     void fill_intervals_2d(const int* __restrict__ row_ids,
