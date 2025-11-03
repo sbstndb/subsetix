@@ -9,15 +9,14 @@ import cupy as cp
 
 from .fields import (
     ActionField,
-    prolong_coarse_to_fine,
     synchronize_interval_fields,
-    interval_field_from_dense,
 )
 from .geometry import TwoLevelGeometry
 from .regrid import enforce_two_level_grading_set, gradient_magnitude, gradient_tag_threshold_set
 from subsetix_cupy.expressions import IntervalSet
 from subsetix_cupy.morphology import full_interval_set
-from subsetix_cupy.interval_field import IntervalField
+from subsetix_cupy.interval_field import IntervalField, create_interval_field
+from subsetix_cupy.multilevel import prolong_field
 
 
 @dataclass(frozen=True)
@@ -138,52 +137,90 @@ class ScalarField:
     def __init__(self, name: str, mesh: TwoLevelMesh, *, dtype: cp.dtype = cp.float32):
         self.name = name
         self.mesh = mesh
-        self.dtype = dtype
+        self.dtype = cp.dtype(dtype)
         if mesh.geometry is None:
             raise RuntimeError("mesh.initialise() must run before creating fields")
-        shape = (mesh.geometry.height, mesh.geometry.width)
-        fine_shape = (shape[0] * mesh.ratio, shape[1] * mesh.ratio)
-        self._coarse = cp.zeros(shape, dtype=dtype)
-        self._fine = cp.zeros(fine_shape, dtype=dtype)
-        self.coarse_field = interval_field_from_dense(self._coarse)
-        self.fine_field = interval_field_from_dense(self._fine)
-
-    @property
-    def coarse(self) -> cp.ndarray:
-        return self._coarse
-
-    @property
-    def fine(self) -> cp.ndarray:
-        return self._fine
+        height = mesh.geometry.height
+        width = mesh.geometry.width
+        ratio = mesh.ratio
+        coarse_interval = full_interval_set(width, height)
+        fine_interval = full_interval_set(width * ratio, height * ratio)
+        self.coarse_field = create_interval_field(coarse_interval, fill_value=0.0, dtype=self.dtype)
+        self.fine_field = create_interval_field(fine_interval, fill_value=0.0, dtype=self.dtype)
 
     def interval_field(self, level: int) -> IntervalField:
         return self.coarse_field if level == self.mesh.min_level else self.fine_field
 
-    def array(self, level: int) -> cp.ndarray:
-        return self.coarse if level == self.mesh.min_level else self.fine
+    def set_interval_fields(
+        self,
+        *,
+        coarse: IntervalField | None = None,
+        fine: IntervalField | None = None,
+    ) -> None:
+        if coarse is not None:
+            self.coarse_field = coarse
+        if fine is not None:
+            self.fine_field = fine
+
+    def to_dense(self, level: int, *, copy: bool = True) -> cp.ndarray:
+        """
+        Materialise the selected level as a dense array.
+
+        By default a copy is returned so external callers cannot mutate the
+        backing storage inadvertently. Internal routines can opt-in to a view
+        by passing ``copy=False``.
+        """
+
+        geometry = self.mesh.geometry
+        if geometry is None:
+            raise RuntimeError("mesh geometry not initialised")
+        ratio = self.mesh.ratio
+        if level == self.mesh.min_level:
+            height = geometry.height
+            width = geometry.width
+            data = self.coarse_field.values.reshape(height, width)
+        elif level == self.mesh.max_level:
+            height = geometry.height * ratio
+            width = geometry.width * ratio
+            data = self.fine_field.values.reshape(height, width)
+        else:
+            raise ValueError(f"unsupported level {level}")
+        return data.copy() if copy else data
+
+    def load_dense(self, level: int, data: cp.ndarray) -> None:
+        """
+        Copy values from a dense array into the interval-backed field.
+        """
+
+        if not isinstance(data, cp.ndarray):
+            raise TypeError("data must be a CuPy array")
+        view = self.to_dense(level, copy=False)
+        if data.shape != view.shape:
+            raise ValueError(f"dense data shape {data.shape} does not match level {level} shape {view.shape}")
+        cp.copyto(view, data.astype(self.dtype, copy=False))
+
+    def fill(self, level: int, value: float) -> None:
+        """
+        Set all cells at ``level`` to a constant value.
+        """
+
+        view = self.to_dense(level, copy=False)
+        view.fill(self.dtype.type(value) if hasattr(self.dtype, "type") else value)
 
     def resize(self) -> None:
         if self.mesh.geometry is None:
             raise RuntimeError("mesh geometry not initialised")
-        shape = (self.mesh.geometry.height, self.mesh.geometry.width)
-        fine_shape = (shape[0] * self.mesh.ratio, shape[1] * self.mesh.ratio)
-        if self._coarse.shape != shape:
-            self._coarse = cp.zeros(shape, dtype=self.dtype)
-            self.coarse_field = interval_field_from_dense(self._coarse)
-        if self._fine.shape != fine_shape:
-            self._fine = cp.zeros(fine_shape, dtype=self.dtype)
-            self.fine_field = interval_field_from_dense(self._fine)
+        height = self.mesh.geometry.height
+        width = self.mesh.geometry.width
+        ratio = self.mesh.ratio
+        coarse_interval = full_interval_set(width, height)
+        fine_interval = full_interval_set(width * ratio, height * ratio)
+        self.coarse_field = create_interval_field(coarse_interval, fill_value=0.0, dtype=self.dtype)
+        self.fine_field = create_interval_field(fine_interval, fill_value=0.0, dtype=self.dtype)
 
     def swap(self, other: "ScalarField") -> None:
-        self._coarse, other._coarse = other._coarse, self._coarse
         self.coarse_field, other.coarse_field = other.coarse_field, self.coarse_field
-        self._fine, other._fine = other._fine, self._fine
         self.fine_field, other.fine_field = other.fine_field, self.fine_field
-
-    def as_arrays(self) -> tuple[cp.ndarray, cp.ndarray]:
-        """Return the coarse and fine arrays (no copy)."""
-
-        return self.coarse, self.fine
 
 
 def make_scalar_field(name: str, mesh: TwoLevelMesh, *, dtype: cp.dtype = cp.float32) -> ScalarField:
@@ -201,7 +238,7 @@ class MRAdaptor:
         self.mode = mode
 
     def __call__(self) -> None:
-        coarse = self.field.coarse
+        coarse = self.field.to_dense(self.mesh.min_level, copy=False)
         grad = gradient_magnitude(coarse)
         tags_set = gradient_tag_threshold_set(grad, self.refine_threshold)
         graded_set = enforce_two_level_grading_set(
@@ -212,7 +249,8 @@ class MRAdaptor:
             height=coarse.shape[0],
         )
         geometry = self.mesh.regrid(graded_set)
-        prolong_coarse_to_fine(coarse, self.mesh.ratio, out=self.field.fine, mask=geometry.fine)
+        ratio = self.mesh.ratio
+        self.field.fine_field = prolong_field(self.field.coarse_field, ratio)
         actions = self.mesh.actions
         if actions is None:
             raise RuntimeError("mesh actions not initialised")

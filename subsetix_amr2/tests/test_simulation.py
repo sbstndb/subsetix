@@ -4,15 +4,24 @@ from subsetix_amr2.simulation import (
     AMR2Simulation,
     SimulationConfig,
     SimulationStats,
-    create_square_field,
+    SquareSpec,
+    build_square_interval_field,
 )
 import cupy as cp
 
 
 class SimulationTest(unittest.TestCase):
-    def test_create_square_field_requires_specs(self) -> None:
+    def test_build_square_interval_field_requires_specs(self) -> None:
         with self.assertRaises(ValueError):
-            create_square_field(8, 8, [])
+            build_square_interval_field(8, 8, [])
+
+    def test_build_square_interval_field_values(self) -> None:
+        spec = SquareSpec(center=(0.5, 0.5), half_width=(0.25, 0.25), value=2.0)
+        field = build_square_interval_field(4, 4, [spec])
+        grid = field.values.reshape(4, 4)
+        expected = cp.zeros((4, 4), dtype=grid.dtype)
+        expected[1:3, 1:3] = 2.0
+        cp.testing.assert_array_equal(grid, expected)
 
     def test_initialize_square_populates_state(self) -> None:
         config = SimulationConfig(

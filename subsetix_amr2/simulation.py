@@ -19,9 +19,7 @@ from .export import save_two_level_vtk
 from .fields import (
     ActionField,
     Action,
-    prolong_coarse_to_fine,
     synchronize_interval_fields,
-    interval_field_from_dense,
 )
 from .geometry import TwoLevelGeometry
 from .regrid import (
@@ -30,7 +28,10 @@ from .regrid import (
     gradient_tag_threshold_set,
 )
 from subsetix_cupy.expressions import IntervalSet
-from subsetix_cupy.interval_stencil import step_upwind_interval
+from subsetix_cupy.interval_field import IntervalField, create_interval_field
+from subsetix_cupy.interval_stencil import step_upwind_interval_field
+from subsetix_cupy.morphology import full_interval_set
+from subsetix_cupy.multilevel import prolong_field
 
 
 @dataclass(frozen=True)
@@ -54,28 +55,31 @@ class SquareSpec:
     value: float = 1.0
 
 
-def create_square_field(
+def build_square_interval_field(
     width: int,
     height: int,
     squares: Sequence[SquareSpec],
     *,
     dtype: cp.dtype = cp.float32,
-) -> cp.ndarray:
+) -> IntervalField:
     """
-    Build a coarse-level field made of axis-aligned squares.
+    Build an interval-backed coarse field populated with axis-aligned squares.
     """
 
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive")
-    if not squares:
+    specs = list(squares)
+    if not specs:
         raise ValueError("at least one SquareSpec is required")
 
-    arr = cp.zeros((height, width), dtype=dtype)
-    # For grids with a single cell we simply fill the whole array when needed.
+    interval = full_interval_set(width, height)
+    field = create_interval_field(interval, fill_value=0.0, dtype=dtype)
+    grid = field.values.reshape(height, width)
+
     x_scale = width - 1 if width > 1 else 1
     y_scale = height - 1 if height > 1 else 1
 
-    for spec in squares:
+    for spec in specs:
         cx, cy = spec.center
         hx, hy = spec.half_width
 
@@ -93,8 +97,11 @@ def create_square_field(
             continue
 
         value = float(spec.value)
-        arr[y0 : y1 + 1, x0 : x1 + 1] = value
-    return arr.astype(dtype, copy=False)
+        if value == 0.0:
+            continue
+        grid[y0 : y1 + 1, x0 : x1 + 1] = value
+
+    return field
 
 
 @dataclass(frozen=True)
@@ -110,10 +117,23 @@ class SimulationConfig:
 
 @dataclass
 class AMRState:
-    coarse: cp.ndarray
-    fine: cp.ndarray
+    coarse_field: IntervalField
+    fine_field: IntervalField
     actions: ActionField
     geometry: TwoLevelGeometry
+
+    @property
+    def coarse(self) -> cp.ndarray:
+        height = self.geometry.height
+        width = self.geometry.width
+        return self.coarse_field.values.reshape(height, width)
+
+    @property
+    def fine(self) -> cp.ndarray:
+        ratio = self.geometry.ratio
+        height = self.geometry.height * ratio
+        width = self.geometry.width * ratio
+        return self.fine_field.values.reshape(height, width)
 
 
 @dataclass(frozen=True)
@@ -165,27 +185,49 @@ class AMR2Simulation:
         """
 
         specs = list(squares) if squares is not None else _DEFAULT_SQUARES
-        field = create_square_field(self.width, self.height, specs, dtype=dtype)
+        coarse_field = build_square_interval_field(self.width, self.height, specs, dtype=dtype)
         if amplitude != 1.0:
-            field = field * float(amplitude)
-        self.set_initial_condition(field)
+            coarse_field.values *= coarse_field.values.dtype.type(float(amplitude))
+        self.set_initial_field(coarse_field)
 
-    def set_initial_condition(self, coarse_field: cp.ndarray) -> None:
+    def set_initial_field(self, coarse_field: IntervalField) -> None:
         """
-        Set the coarse-level field and derive the fine level / geometry.
+        Attach an interval-backed coarse field and derive fine level / geometry.
         """
 
-        if not isinstance(coarse_field, cp.ndarray):
-            raise TypeError("coarse_field must be a CuPy array")
-        if coarse_field.shape != (self.height, self.width):
-            raise ValueError(f"coarse_field must have shape {(self.height, self.width)}")
-        coarse = coarse_field.astype(cp.float32, copy=False)
-        fine = prolong_coarse_to_fine(coarse, self.config.ratio)
-        refine_set = self._refine_from_gradient(coarse)
-        refine_field = ActionField.full_grid(self.height, self.width, self.config.ratio, default=Action.KEEP)
-        refine_field.set_from_interval_set(refine_set)
-        geometry = self._build_geometry(refine_field)
-        self.state = AMRState(coarse=coarse, fine=fine, actions=refine_field, geometry=geometry)
+        if not isinstance(coarse_field, IntervalField):
+            raise TypeError("coarse_field must be an IntervalField")
+        height = self.height
+        width = self.width
+        interval = coarse_field.interval_set
+        if interval.row_count != height:
+            raise ValueError("coarse_field height mismatch with simulation domain")
+        row_ids = interval.rows_index()
+        expected_rows = cp.arange(height, dtype=cp.int32)
+        if row_ids.size != expected_rows.size or not bool(cp.all(row_ids == expected_rows)):
+            raise ValueError("coarse_field rows must cover the dense range [0, height)")
+        intervals_per_row = interval.row_offsets[1:] - interval.row_offsets[:-1]
+        if not bool(cp.all(intervals_per_row == 1)):
+            raise ValueError("coarse_field must contain exactly one interval per row")
+        if not bool(cp.all(interval.begin == 0)) or not bool(cp.all(interval.end == width)):
+            raise ValueError("coarse_field must cover the full width on every row")
+        if int(coarse_field.values.size) != width * height:
+            raise ValueError("coarse_field must hold width * height cells")
+
+        coarse_grid = coarse_field.values.reshape(height, width)
+        refine_set = self._refine_from_gradient(coarse_grid)
+        actions = ActionField.full_grid(height, width, self.config.ratio, default=Action.KEEP)
+        actions.set_from_interval_set(refine_set)
+        geometry = self._build_geometry(actions)
+
+        fine_field = prolong_field(coarse_field, self.config.ratio)
+
+        self.state = AMRState(
+            coarse_field=coarse_field,
+            fine_field=fine_field,
+            actions=actions,
+            geometry=geometry,
+        )
         self.current_step = 0
         self.current_time = 0.0
 
@@ -265,11 +307,9 @@ class AMR2Simulation:
 
     def _synchronize(self) -> None:
         state = self._require_state()
-        coarse_field = interval_field_from_dense(state.coarse)
-        fine_field = interval_field_from_dense(state.fine)
         synchronize_interval_fields(
-            coarse_field,
-            fine_field,
+            state.coarse_field,
+            state.fine_field,
             state.actions,
             ratio=self.config.ratio,
             reducer="mean",
@@ -288,8 +328,28 @@ class AMR2Simulation:
     def _advance(self) -> None:
         state = self._require_state()
         a, b = self.config.velocity
-        state.coarse = _step_upwind(state.coarse, a, b, self.dt, self.dx_coarse, self.dy_coarse)
-        state.fine = _step_upwind(state.fine, a, b, self.dt, self.dx_fine, self.dy_fine)
+        geometry = state.geometry
+        ratio = geometry.ratio
+        state.coarse_field = step_upwind_interval_field(
+            state.coarse_field,
+            width=geometry.width,
+            height=geometry.height,
+            a=a,
+            b=b,
+            dt=self.dt,
+            dx=self.dx_coarse,
+            dy=self.dy_coarse,
+        )
+        state.fine_field = step_upwind_interval_field(
+            state.fine_field,
+            width=geometry.width * ratio,
+            height=geometry.height * ratio,
+            a=a,
+            b=b,
+            dt=self.dt,
+            dx=self.dx_fine,
+            dy=self.dy_fine,
+        )
 
     def _build_stats(self, *, step: int) -> SimulationStats:
         state = self._require_state()
@@ -328,8 +388,8 @@ class TwoLevelVTKExporter:
             self.directory,
             self.prefix,
             stats.step,
-            coarse_field=state.coarse,
-            fine_field=state.fine,
+            coarse_field=state.coarse_field,
+            fine_field=state.fine_field,
             refine_set=state.actions.refine_set(),
             coarse_only_set=state.geometry.coarse_only,
             fine_set=state.geometry.fine,
@@ -338,29 +398,9 @@ class TwoLevelVTKExporter:
             ratio=stats.ratio,
             time_value=stats.time,
             ghost_halo=self.ghost_halo,
+            width=state.geometry.width,
+            height=state.geometry.height,
         )
-
-
-def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: float) -> cp.ndarray:
-    u32 = u.astype(cp.float32, copy=False)
-    height, width = u32.shape
-    if height == 0 or width == 0:
-        return cp.empty_like(u32)
-
-    field = interval_field_from_dense(u32)
-    out_flat = cp.empty_like(field.values)
-    result = step_upwind_interval(
-        field,
-        width=width,
-        height=height,
-        a=a,
-        b=b,
-        dt=dt,
-        dx=dx,
-        dy=dy,
-        out=out_flat,
-    )
-    return result.reshape(height, width)
 
 
 _DEFAULT_SQUARES: list[SquareSpec] = [

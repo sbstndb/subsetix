@@ -37,7 +37,7 @@ from .simulation import (
     SimulationStats,
     SquareSpec,
     TwoLevelVTKExporter,
-    create_square_field,
+    build_square_interval_field,
 )
 
 __all__ = [
@@ -70,5 +70,5 @@ __all__ = [
     "SimulationStats",
     "SquareSpec",
     "TwoLevelVTKExporter",
-    "create_square_field",
+    "build_square_interval_field",
 ]
