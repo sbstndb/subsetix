@@ -3,14 +3,14 @@
 This repository is now a pure Python/CuPy project that focuses on set
 operations (union / intersection / difference) between per-row interval sets.
 It runs entirely on the GPU using custom CuPy `RawKernel`s and provides both a
-high-level expression API and ready-to-use demos/benchmarks.
+high-level expression API plus targeted benchmarks and AMR demos.
 
 ## Requirements
 
 - Python 3.9+
 - [CuPy](https://cupy.dev/) built against a CUDA toolkit matching your GPU
   (`pip install cupy-cuda12x`, `cupy-cuda11x`, …)
-- NumPy, Matplotlib (for the interactive demo)
+- NumPy (tests, utilities)
 
 ## Installation
 
@@ -32,29 +32,14 @@ The package is importable as `subsetix_cupy`.
   intersection / difference / symmetric difference / complement) using CuPy
   kernels and a reusable `CuPyWorkspace`.
 - `subsetix_cupy/kernels.py` — RawKernel definitions for the count/write passes.
-- `subsetix_cupy/demo_multishape.py` — Interactive demo that rasterises a grid
-  of rectangles and circles, computes set operations, and plots the results.
 - `subsetix_cupy/benchmark_multishape.py` — Headless benchmark that replays the
   operations repeatedly to stress the GPU.
 - `subsetix_cupy/tests/test_expressions.py` — Unit tests covering the GPU
   expression API (requires a working CuPy + CUDA runtime).
+- `subsetix_amr2/demo_two_level_advection.py` — Two-level AMR advection driver
+  using the interval-set workspace + graph APIs.
 
 ## Usage
-
-### Demo (with plots)
-
-```bash
-python -m subsetix_cupy.demo_multishape \
-    --resolution 1024 \
-    --rows 24 \
-    --cols 24 \
-    --rect-strips 2 \
-    --circles-per-cell 2
-```
-
-Arguments let you adjust the density of rectangles/circles and the raster
-resolution. Omit the flags for the default 512² grid. Add `--no-plot` to skip
-Matplotlib (useful on headless machines).
 
 ### Benchmark (no plots)
 
@@ -71,6 +56,19 @@ python -m subsetix_cupy.benchmark_multishape \
 
 The script prints interval counts, total time, time per iteration, and average
 nanoseconds per produced interval.
+
+### Two-level AMR demo
+
+```bash
+python -m subsetix_amr2.demo_two_level_advection \
+    --coarse 256 \
+    --steps 200 \
+    --refine-threshold 0.05 \
+    --ghost-halo 1
+```
+
+This driver advects a square along the diagonal, rebuilds the interval-based
+mesh every step, and can optionally export VTK snapshots with `--save-vtk`.
 
 ### Benchmark Suite (GPU micro-benchmarks)
 

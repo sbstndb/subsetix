@@ -2,14 +2,141 @@ import unittest
 
 import cupy as cp
 
-from subsetix_cupy.demo_advection2d_amr3 import (
-    _init_condition,
-    _grad_mag,
-    _hysteresis_mask,
-    _prolong_repeat,
-    _erode_mo,
-    _dilate_mo,
-)
+
+def _init_condition(W: int, H: int, kind: str = "sharp", amp: float = 1.0) -> cp.ndarray:
+    xx = cp.linspace(0.0, 1.0, W, dtype=cp.float32)
+    yy = cp.linspace(0.0, 1.0, H, dtype=cp.float32)
+    X, Y = cp.meshgrid(xx, yy)
+    if kind == "gauss":
+        g1 = cp.exp(-((X - 0.30) ** 2 + (Y - 0.65) ** 2) / (2 * 0.05**2))
+        g2 = cp.exp(-((X - 0.70) ** 2 + (Y - 0.30) ** 2) / (2 * 0.06**2))
+        ridge = cp.maximum(0.0, 1.0 - 25.0 * (Y - 0.5) ** 2)
+        u = 0.9 * g1 + 0.7 * g2 + 0.3 * ridge
+    elif kind == "disk":
+        d1 = ((X - 0.35) ** 2 + (Y - 0.6) ** 2) <= (0.12 ** 2)
+        d2 = ((X - 0.68) ** 2 + (Y - 0.32) ** 2) <= (0.10 ** 2)
+        u = (d1 | d2).astype(cp.float32)
+    elif kind == "square":
+        s1 = (cp.abs(X - 0.30) <= 0.10) & (cp.abs(Y - 0.65) <= 0.10)
+        s2 = (cp.abs(X - 0.70) <= 0.10) & (cp.abs(Y - 0.30) <= 0.12)
+        u = (s1 | s2).astype(cp.float32)
+    elif kind == "edge":
+        u = (X + Y < 0.9).astype(cp.float32)
+    else:
+        g1 = cp.exp(-((X - 0.30) ** 2 + (Y - 0.65) ** 2) / (2 * 0.03**2))
+        g2 = cp.exp(-((X - 0.70) ** 2 + (Y - 0.30) ** 2) / (2 * 0.035**2))
+        ridge = cp.maximum(0.0, 1.0 - 60.0 * (Y - 0.5) ** 2)
+        u = 1.2 * g1 + 1.0 * g2 + 0.25 * ridge
+    if amp != 1.0:
+        u = (u * amp).astype(cp.float32, copy=False)
+    return u.astype(cp.float32, copy=False)
+
+
+def _grad_mag(u: cp.ndarray) -> cp.ndarray:
+    gy, gx = cp.gradient(u)
+    return cp.sqrt(gx * gx + gy * gy)
+
+
+def _prolong_repeat(arr: cp.ndarray, ratio: int) -> cp.ndarray:
+    result = cp.repeat(cp.repeat(arr, ratio, axis=0), ratio, axis=1)
+    if arr.dtype == cp.bool_:
+        return result.astype(cp.bool_, copy=False)
+    return result.astype(arr.dtype, copy=False)
+
+
+def _dilate_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
+    if wrap:
+        shifts = [
+            (0, 0),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
+        ]
+        acc = cp.zeros_like(mask, dtype=cp.bool_)
+        for dy, dx in shifts:
+            acc |= cp.roll(cp.roll(mask, dy, axis=0), dx, axis=1)
+        return acc
+    H, W = mask.shape
+    acc = cp.zeros_like(mask, dtype=cp.bool_)
+    acc |= mask
+    if H > 1:
+        acc[1:, :] |= mask[:-1, :]
+        acc[:-1, :] |= mask[1:, :]
+    if W > 1:
+        acc[:, 1:] |= mask[:, :-1]
+        acc[:, :-1] |= mask[:, 1:]
+    if H > 1 and W > 1:
+        acc[1:, 1:] |= mask[:-1, :-1]
+        acc[1:, :-1] |= mask[:-1, 1:]
+        acc[:-1, 1:] |= mask[1:, :-1]
+        acc[:-1, :-1] |= mask[1:, 1:]
+    return acc
+
+
+def _erode_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
+    if wrap:
+        shifts = [
+            (0, 0),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
+        ]
+        acc = cp.ones_like(mask, dtype=cp.bool_)
+        for dy, dx in shifts:
+            acc &= cp.roll(cp.roll(mask, dy, axis=0), dx, axis=1)
+        return acc
+    H, W = mask.shape
+    acc = mask.astype(cp.bool_, copy=True)
+    if H > 1:
+        up = cp.zeros_like(mask); up[1:, :] = mask[:-1, :]
+        down = cp.zeros_like(mask); down[:-1, :] = mask[1:, :]
+        acc &= up
+        acc &= down
+    if W > 1:
+        left = cp.zeros_like(mask); left[:, 1:] = mask[:, :-1]
+        right = cp.zeros_like(mask); right[:, :-1] = mask[:, 1:]
+        acc &= left
+        acc &= right
+    if H > 1 and W > 1:
+        up_left = cp.zeros_like(mask); up_left[1:, 1:] = mask[:-1, :-1]
+        up_right = cp.zeros_like(mask); up_right[1:, :-1] = mask[:-1, 1:]
+        down_left = cp.zeros_like(mask); down_left[:-1, 1:] = mask[1:, :-1]
+        down_right = cp.zeros_like(mask); down_right[:-1, :-1] = mask[1:, 1:]
+        acc &= up_left
+        acc &= up_right
+        acc &= down_left
+        acc &= down_right
+    return acc
+
+
+def _hysteresis_mask(
+    gradient: cp.ndarray,
+    frac_high: float,
+    frac_low: float,
+    previous: cp.ndarray | None,
+) -> cp.ndarray:
+    frac_high = max(0.0, min(1.0, float(frac_high)))
+    frac_low = max(0.0, min(frac_high, float(frac_low)))
+    if frac_high <= 0.0:
+        return cp.zeros_like(gradient, dtype=cp.bool_)
+    flat = gradient.ravel()
+    t_high = cp.percentile(flat, (1.0 - frac_high) * 100.0)
+    high = gradient >= t_high
+    if previous is None or frac_low <= 0.0:
+        return high
+    t_low = cp.percentile(flat, (1.0 - frac_low) * 100.0)
+    low = gradient >= t_low
+    return high | (previous.astype(cp.bool_) & low)
 
 
 def _no_contact_moore(level2_fine: cp.ndarray, level1_fine: cp.ndarray) -> bool:
