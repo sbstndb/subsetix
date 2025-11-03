@@ -103,6 +103,9 @@ def run_demo(args: argparse.Namespace):
 
     print(f"Completed {args.steps} steps in {elapsed:.2f}s ({elapsed / max(1, args.steps):.4f}s/step)")
 
+    if args.check_symmetry:
+        _ensure_symmetry(final_state)
+
     render(
         final_state,
         final_stats.dt,
@@ -148,8 +151,36 @@ def create_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ghost-halo", type=int, default=1, help="Ghost halo in coarse cells recorded in VTK outputs")
     ap.add_argument("--verbose", action="store_true", help="Print per-step diagnostics")
     ap.add_argument("--print-every", type=int, default=25, help="Diagnostic print frequency (steps)")
+    ap.add_argument("--check-symmetry", action="store_true", help="Fail if final mesh/field deviate from diagonal symmetry")
     ap.add_argument("--ic-amp", type=float, default=None, help=argparse.SUPPRESS)  # legacy flag
     return ap
+
+
+def _ensure_symmetry(state: AMRState, tol: float = 1e-5) -> None:
+    coarse_diff = float(cp.max(cp.abs(state.coarse - state.coarse.T)).item())
+    fine_diff = float(cp.max(cp.abs(state.fine - state.fine.T)).item())
+    refine_mask = state.refine_mask
+    geometry = state.geometry
+    coarse_only = interval_set_to_mask(geometry.coarse_only, refine_mask.shape[1])
+    fine_mask = geometry.fine_mask
+
+    mask_asym = bool(cp.any(refine_mask != refine_mask.T))
+    coarse_only_asym = bool(cp.any(coarse_only != coarse_only.T))
+    fine_mask_asym = bool(cp.any(fine_mask != fine_mask.T))
+
+    if any([
+        coarse_diff > tol,
+        fine_diff > tol,
+        mask_asym,
+        coarse_only_asym,
+        fine_mask_asym,
+    ]):
+        raise RuntimeError(
+            "Symmetry check failed: "
+            f"coarse_diff={coarse_diff:.2e}, fine_diff={fine_diff:.2e}, "
+            f"mask_asym={mask_asym}, coarse_only_asym={coarse_only_asym}, "
+            f"fine_mask_asym={fine_mask_asym}"
+        )
 
 
 def main(argv: list[str] | None = None):

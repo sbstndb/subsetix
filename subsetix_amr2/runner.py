@@ -191,7 +191,7 @@ def save_snapshot(
 def run_two_level_simulation(
     args: SimulationArgs,
     init_fn: Callable[[ScalarField], None],
-) -> None:
+) -> ScalarField:
     mesh = build_mesh(args)
     field = make_scalar_field("u", mesh)
     init_fn(field)
@@ -238,3 +238,5 @@ def run_two_level_simulation(
         step += 1
         if args.output is not None and (step % args.output.every == 0 or math.isclose(t, args.tf)):
             save_snapshot(args.output, mesh, field, step, time_value=t, bc=args.bc)
+
+    return field

@@ -25,7 +25,7 @@ class RunnerTest(unittest.TestCase):
             f.coarse.fill(1.0)
             f.fine.fill(1.0)
 
-        run_two_level_simulation(
+        field = run_two_level_simulation(
             SimulationArgs(
                 min_corner=(0.0, 0.0),
                 max_corner=(1.0, 1.0),
@@ -40,6 +40,8 @@ class RunnerTest(unittest.TestCase):
             ),
             init_fn,
         )
+        coarse, _ = field.as_arrays()
+        self.cp.testing.assert_array_equal(coarse, self.cp.full(coarse.shape, 1.0, dtype=coarse.dtype))
 
 
 if __name__ == "__main__":
