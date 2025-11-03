@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 import cupy as cp
 
@@ -10,6 +10,93 @@ from subsetix_cupy.interval_field import IntervalField, create_interval_field
 from subsetix_cupy.expressions import IntervalSet, _require_cupy
 from .geometry import mask_to_interval_set, interval_set_to_mask
 from subsetix_cupy import prolong_set
+
+_PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
+    "raw T coarse, int32 coarse_w, int32 ratio",
+    "T out",
+    """
+    const int fine_w = coarse_w * ratio;
+    const int fy = i / fine_w;
+    const int fx = i - fy * fine_w;
+    const int cy = fy / ratio;
+    const int cx = fx / ratio;
+    out = coarse[cy * coarse_w + cx];
+    """,
+    "subsetix_amr2_prolong_nearest",
+)
+
+_COPY_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
+
+
+def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
+    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
+    interval_count = int(interval_set.begin.size)
+    if interval_count == 0:
+        return cp.zeros(0, dtype=cp.int32)
+    idx = cp.arange(interval_count, dtype=cp.int32)
+    return cp.searchsorted(row_offsets[1:], idx, side="right").astype(cp.int32, copy=False)
+
+
+def _get_copy_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
+    key = cp.dtype(dtype).str
+    kernel = _COPY_KERNEL_CACHE.get(key)
+    if kernel is not None:
+        return kernel
+    if dtype == cp.float32:
+        type_name = "float"
+    elif dtype == cp.float64:
+        type_name = "double"
+    elif dtype == cp.int32:
+        type_name = "int"
+    elif dtype == cp.int64:
+        type_name = "long long"
+    elif dtype == cp.bool_:
+        type_name = "bool"
+    else:
+        raise TypeError(f"unsupported dtype for interval copy: {dtype}")
+    code = f"""
+    extern "C" __global__
+    void copy_intervals_2d(const int* __restrict__ row_ids,
+                           const int* __restrict__ begin,
+                           const int* __restrict__ end,
+                           const {type_name}* __restrict__ src,
+                           {type_name}* __restrict__ dst,
+                           int width)
+    {{
+        int interval = blockIdx.x;
+        int row = row_ids[interval];
+        int start = begin[interval];
+        int stop = end[interval];
+        if (stop <= start) {{
+            return;
+        }}
+        int base = row * width;
+        for (int col = start + threadIdx.x; col < stop; col += blockDim.x) {{
+            dst[base + col] = src[base + col];
+        }}
+    }}
+    """
+    kernel = cp.RawKernel(code, "copy_intervals_2d", options=("--std=c++11",))
+    _COPY_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
+def _copy_intervals_into(dst: cp.ndarray, src: cp.ndarray, interval_set: IntervalSet) -> None:
+    if dst.ndim != 2 or src.ndim != 2:
+        raise ValueError("dst and src must be 2D arrays")
+    if dst.shape != src.shape:
+        raise ValueError("dst and src must have the same shape")
+    if dst.dtype != src.dtype:
+        raise TypeError("dst and src must have matching dtypes")
+    interval_count = int(interval_set.begin.size)
+    if interval_count == 0:
+        return
+    row_ids = _interval_row_ids(interval_set)
+    kernel = _get_copy_intervals_kernel(dst.dtype)
+    block = 128
+    grid = (interval_count,)
+    width = int(dst.shape[1])
+    kernel(grid, (block,), (row_ids, interval_set.begin, interval_set.end, src, dst, width))
 
 
 class Action(IntEnum):
@@ -118,17 +205,26 @@ def prolong_coarse_to_fine(
     Repeat a coarse field onto the fine grid (nearest-neighbour prolongation).
     """
 
-    ratio = int(ratio)
     if ratio < 1:
         raise ValueError("ratio must be >= 1")
-    upsampled = cp.repeat(cp.repeat(coarse, ratio, axis=0), ratio, axis=1)
+    if coarse.ndim != 2:
+        raise ValueError("coarse must be a 2D array")
+    coarse_h, coarse_w = coarse.shape
+    fine_shape = (coarse_h * ratio, coarse_w * ratio)
+    upsampled = _PROLONG_NEAREST_KERNEL(
+        coarse.ravel(), cp.int32(coarse_w), cp.int32(ratio), size=fine_shape[0] * fine_shape[1]
+    ).reshape(fine_shape)
     if out is None:
-        out = cp.empty_like(upsampled)
+        if mask is not None:
+            out = cp.zeros_like(upsampled)
+        else:
+            return upsampled
     elif out.shape != upsampled.shape:
         raise ValueError("out must match the fine grid shape")
     if mask is None:
         cp.copyto(out, upsampled)
     else:
+        mask = mask.astype(cp.bool_, copy=False)
         if mask.shape != upsampled.shape:
             raise ValueError("mask must match fine grid shape")
         cp.copyto(out, upsampled, where=mask)
@@ -179,26 +275,30 @@ def synchronize_two_level(
     2. Optionally refill fine values outside the refine region from the coarse grid.
     """
 
-    action_field: ActionField | None = None
-    if isinstance(refine_mask, ActionField):
-        action_field = refine_mask
-        coarse_mask = action_field.refine_mask()
+    if not isinstance(refine_mask, ActionField):
+        mask_array = cp.asarray(refine_mask, dtype=cp.bool_)
+        if mask_array.shape != coarse.shape:
+            raise ValueError("refine_mask must have same shape as coarse grid")
+        action_field = ActionField.full_grid(coarse.shape[0], coarse.shape[1], ratio)
+        action_field.set_from_mask(mask_array)
     else:
-        coarse_mask = refine_mask
+        action_field = refine_mask
 
-    if coarse.shape != coarse_mask.shape:
-        raise ValueError("refine_mask must have same shape as coarse grid")
+    if action_field.height != coarse.shape[0] or action_field.width != coarse.shape[1]:
+        raise ValueError("ActionField dimensions must match coarse grid shape")
+    if int(action_field.ratio) != int(ratio):
+        raise ValueError("ratio argument must match ActionField ratio")
+
     ratio = int(ratio)
     restricted = restrict_fine_to_coarse(fine, ratio, reducer=reducer)
     coarse_updated = cp.array(coarse, copy=True)
-    cp.copyto(coarse_updated, restricted, where=coarse_mask)
+    refine_set = action_field.refine_set()
+    _copy_intervals_into(coarse_updated, restricted, refine_set)
+
     if not fill_fine_outside:
         return coarse_updated, cp.array(fine, copy=True)
-    if action_field is None:
-        fine_mask = cp.repeat(cp.repeat(coarse_mask, ratio, axis=0), ratio, axis=1)
-    else:
-        fine_mask = action_field.fine_mask()
-    prolongated = prolong_coarse_to_fine(coarse_updated, ratio)
-    fine_updated = cp.array(fine, copy=True)
-    cp.copyto(fine_updated, prolongated, where=~fine_mask)
+
+    fine_updated = prolong_coarse_to_fine(coarse_updated, ratio)
+    fine_set = action_field.fine_set()
+    _copy_intervals_into(fine_updated, fine, fine_set)
     return coarse_updated, fine_updated

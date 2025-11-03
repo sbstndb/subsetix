@@ -9,5 +9,3 @@ class DemoParserTest(unittest.TestCase):
         ns = parser.parse_args([])
         self.assertEqual(ns.coarse, 96)
         self.assertEqual(ns.steps, 300)
-        self.assertFalse(ns.animate)
-        self.assertEqual(ns.interval, 60)

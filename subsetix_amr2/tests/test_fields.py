@@ -20,6 +20,19 @@ class FieldsTest(unittest.TestCase):
         restored = restrict_fine_to_coarse(fine, 2)
         self.cp.testing.assert_array_equal(restored, coarse)
 
+    def test_prolong_with_mask_updates_subset(self) -> None:
+        coarse = self.cp.arange(4, dtype=self.cp.float32).reshape(2, 2)
+        mask = self.cp.zeros((4, 4), dtype=self.cp.bool_)
+        mask[::2, ::2] = True
+        out = self.cp.full((4, 4), -1.0, dtype=self.cp.float32)
+        prolong_coarse_to_fine(coarse, 2, out=out, mask=mask)
+        expected = self.cp.full((4, 4), -1.0, dtype=self.cp.float32)
+        expected[0, 0] = 0.0
+        expected[0, 2] = 1.0
+        expected[2, 0] = 2.0
+        expected[2, 2] = 3.0
+        self.cp.testing.assert_array_equal(out, expected)
+
     def test_restrict_reducer(self) -> None:
         fine = self.cp.ones((4, 4), dtype=self.cp.float32)
         fine[::2, ::2] = 3.0

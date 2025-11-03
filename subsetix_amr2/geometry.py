@@ -43,17 +43,18 @@ def mask_to_interval_set(mask: cp.ndarray) -> IntervalSet:
     diff = cp_mod.diff(pad, axis=1)
     starts = diff == 1
     stops = diff == -1
-    if int(starts.sum().item()) == 0:
+
+    start_rows, start_cols = cp_mod.where(starts)
+    if start_rows.size == 0:
         zero = cp_mod.zeros(0, dtype=cp_mod.int32)
         offsets = cp_mod.zeros(rows + 1, dtype=cp_mod.int32)
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
 
-    start_rows, start_cols = cp_mod.where(starts)
     stop_rows, stop_cols = cp_mod.where(stops)
-    start_counts = cp_mod.bincount(start_rows, minlength=rows)
-    stop_counts = cp_mod.bincount(stop_rows, minlength=rows)
-    if int(cp_mod.any(start_counts != stop_counts)):
+    if stop_rows.size != start_rows.size:
         raise RuntimeError("mask->interval conversion mismatch between starts and stops")
+
+    start_counts = cp_mod.bincount(start_rows, minlength=rows)
 
     row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
     row_offsets[0] = 0

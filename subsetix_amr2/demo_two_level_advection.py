@@ -4,7 +4,7 @@ Two-level AMR advection demo built on top of subsetix_amr2.
 Usage example:
 
     python -m subsetix_amr2.demo_two_level_advection \\
-        --coarse 96 --steps 200 --refine-frac 0.10 --plot
+        --coarse 96 --steps 200 --refine-frac 0.10
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from .simulation import (
     SimulationStats,
     TwoLevelVTKExporter,
 )
-from .visualize import capture_frame, render
 
 
 def run_demo(args: argparse.Namespace):
@@ -43,8 +42,6 @@ def run_demo(args: argparse.Namespace):
     )
     sim = AMR2Simulation(config)
     sim.initialize_square(amplitude=float(args.square_amp))
-
-    history: List[Tuple[int, cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]] = []
 
     exporters = []
     if args.save_vtk:
@@ -77,20 +74,12 @@ def run_demo(args: argparse.Namespace):
                 f"||u_fine||={stats.fine_norm:.4f}"
             )
 
-    def _animation_listener(state: AMRState, stats: SimulationStats) -> None:
-        if not args.animate:
-            return
-        history.append(capture_frame(state, stats.step))
-
-    listeners = [_verbose_listener, _animation_listener]
+    listeners = [_verbose_listener]
 
     print(
         f"Starting 2-level AMR demo: coarse={W}x{W}, ratio={ratio}, "
         f"dt={sim.dt:.6f}, steps={args.steps}"
     )
-
-    if args.plot and plt is None:
-        raise RuntimeError("matplotlib is required for plotting (install matplotlib)")
 
     t0 = time.perf_counter()
     final_state, final_stats = sim.run(
@@ -103,16 +92,7 @@ def run_demo(args: argparse.Namespace):
 
     print(f"Completed {args.steps} steps in {elapsed:.2f}s ({elapsed / max(1, args.steps):.4f}s/step)")
 
-    render(
-        final_state,
-        final_stats.dt,
-        history,
-        animate=args.animate,
-        plot=args.plot,
-        interval=args.interval,
-        loop=args.loop,
-        save_animation=args.save_animation,
-    )
+    # Live plotting/animation removed to avoid host-side overhead.
 
 
 def create_argparser() -> argparse.ArgumentParser:
@@ -137,11 +117,7 @@ def create_argparser() -> argparse.ArgumentParser:
         default=1.0,
         help="Scale factor applied to the square initial condition pattern",
     )
-    ap.add_argument("--plot", action="store_true", help="Display matplotlib plots at the end")
-    ap.add_argument("--animate", action="store_true", help="Generate a matplotlib animation of the run")
-    ap.add_argument("--interval", type=int, default=60, help="Animation frame interval in milliseconds")
-    ap.add_argument("--loop", action="store_true", help="Loop the animation when displaying")
-    ap.add_argument("--save-animation", type=str, default=None, help="Path to save the animation (GIF/MP4)")
+    # Live plotting/animation options removed
     ap.add_argument("--save-vtk", type=str, default=None, help="Directory where VTK outputs will be written")
     ap.add_argument("--vtk-every", type=int, default=10, help="Write VTK outputs every N steps (includes step 0)")
     ap.add_argument("--vtk-prefix", type=str, default="amr2", help="Filename prefix for VTK outputs")
