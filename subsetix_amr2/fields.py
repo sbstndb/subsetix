@@ -157,12 +157,7 @@ def _intervals_for_value(grid: cp.ndarray, target: int) -> IntervalSet:
 
 
 def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
-    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
-    interval_count = int(interval_set.begin.size)
-    if interval_count == 0:
-        return cp.zeros(0, dtype=cp.int32)
-    idx = cp.arange(interval_count, dtype=cp.int32)
-    return cp.searchsorted(row_offsets[1:], idx, side="right").astype(cp.int32, copy=False)
+    return interval_set.interval_rows().astype(cp.int32, copy=False)
 
 
 def _get_copy_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:

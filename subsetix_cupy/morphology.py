@@ -19,28 +19,29 @@ def _clone_interval_set(interval_set: IntervalSet) -> IntervalSet:
         begin=cp.array(interval_set.begin, dtype=cp.int32, copy=True),
         end=cp.array(interval_set.end, dtype=cp.int32, copy=True),
         row_offsets=cp.array(interval_set.row_offsets, dtype=cp.int32, copy=True),
+        rows=cp.array(interval_set.rows, dtype=cp.int32, copy=True) if interval_set.rows is not None else None,
     )
 
 
-def _row_ids(row_offsets) -> "object":
-    cp = _require_cupy()
-    row_count = int(row_offsets.size - 1)
-    if row_count <= 0:
-        return cp.zeros(0, dtype=cp.int32)
-    total = int(row_offsets[-1].item())
-    if total == 0:
-        return cp.zeros(0, dtype=cp.int32)
-    positions = cp.arange(total, dtype=cp.int32)
-    return cp.searchsorted(row_offsets[1:], positions, side="right").astype(cp.int32, copy=False)
+def _row_ids(interval_set: IntervalSet) -> "object":
+    return interval_set.interval_rows()
 
 
-def _build_interval_set_from_rows(rows, begin, end, row_count: int) -> IntervalSet:
+def _build_interval_set_from_rows(rows, begin, end, *, rows_hint=None) -> IntervalSet:
     cp = _require_cupy()
-    row_count = int(row_count)
     if begin.size == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        offsets = cp.zeros(row_count + 1, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        if rows_hint is not None:
+            rows_out = cp.unique(cp.asarray(rows_hint, dtype=cp.int32))
+            offsets = cp.zeros(rows_out.size + 1, dtype=cp.int32)
+        else:
+            offsets = cp.zeros(1, dtype=cp.int32)
+            rows_out = cp.zeros(0, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
+
+    rows = cp.asarray(rows, dtype=cp.int32)
+    begin = cp.asarray(begin, dtype=cp.int32)
+    end = cp.asarray(end, dtype=cp.int32)
 
     keys = cp.vstack((begin, rows))
     order = cp.lexsort(keys)
@@ -48,11 +49,24 @@ def _build_interval_set_from_rows(rows, begin, end, row_count: int) -> IntervalS
     begin_sorted = begin[order]
     end_sorted = end[order]
 
-    counts = cp.bincount(rows_sorted, minlength=row_count).astype(cp.int32, copy=False)
+    unique_rows, inverse = cp.unique(rows_sorted, return_inverse=True)
+    if rows_hint is not None:
+        rows_hint_arr = cp.unique(cp.asarray(rows_hint, dtype=cp.int32))
+        rows_out = cp.union1d(rows_hint_arr, unique_rows)
+    else:
+        rows_out = unique_rows
+
+    row_count = int(rows_out.size)
+    counts_full = cp.zeros(row_count, dtype=cp.int32)
+    if unique_rows.size:
+        counts_unique = cp.bincount(inverse, minlength=unique_rows.size).astype(cp.int32, copy=False)
+        positions = cp.searchsorted(rows_out, unique_rows)
+        counts_full[positions] = counts_unique
+
     row_offsets_raw = cp.empty(row_count + 1, dtype=cp.int32)
     row_offsets_raw[0] = 0
     if row_count > 0:
-        cp.cumsum(counts, dtype=cp.int32, out=row_offsets_raw[1:])
+        cp.cumsum(counts_full, dtype=cp.int32, out=row_offsets_raw[1:])
 
     merge_count_kernel = get_kernels(cp)[3]
     merge_write_kernel = get_kernels(cp)[4]
@@ -80,7 +94,7 @@ def _build_interval_set_from_rows(rows, begin, end, row_count: int) -> IntervalS
     total = int(row_offsets[-1].item()) if row_count > 0 else 0
     if total == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets)
+        return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets, rows=rows_out.astype(cp.int32, copy=False))
 
     out_begin = cp.empty(total, dtype=cp.int32)
     out_end = cp.empty(total, dtype=cp.int32)
@@ -99,7 +113,7 @@ def _build_interval_set_from_rows(rows, begin, end, row_count: int) -> IntervalS
         ),
     )
 
-    return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets)
+    return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets, rows=rows_out.astype(cp.int32, copy=False))
 
 
 def _dilate_interval_set_horizontal_clamp(
@@ -117,7 +131,16 @@ def _dilate_interval_set_horizontal_clamp(
     base_begin = interval_set.begin.astype(cp.int32, copy=True)
     base_end = interval_set.end.astype(cp.int32, copy=True)
     row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
-    row_ids = _row_ids(row_offsets)
+    row_ids = _row_ids(interval_set)
+    rows_layout = interval_set.rows_index()
+    if rows_layout.size != row_count:
+        raise ValueError("interval_set rows mismatch with provided row_count")
+    if row_count > 0:
+        dense_rows = cp.arange(row_count, dtype=cp.int32)
+        if not bool(cp.all(rows_layout == dense_rows)):
+            raise ValueError("clamp dilation requires dense row indexing")
+    else:
+        dense_rows = cp.zeros(0, dtype=cp.int32)
 
     begin_expanded = cp.maximum(base_begin - halo_x, 0)
     end_expanded = cp.minimum(base_end + halo_x, width)
@@ -126,7 +149,7 @@ def _dilate_interval_set_horizontal_clamp(
     if int(valid_mask.sum()) == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(row_count + 1, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=dense_rows)
 
     rows_valid = row_ids[valid_mask]
     begin_valid = begin_expanded[valid_mask]
@@ -135,7 +158,7 @@ def _dilate_interval_set_horizontal_clamp(
     if row_count == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(1, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=dense_rows)
 
     counts = (
         cp.bincount(rows_valid, minlength=row_count).astype(cp.int32, copy=False)
@@ -151,7 +174,7 @@ def _dilate_interval_set_horizontal_clamp(
     total = int(row_offsets_valid[-1].item()) if row_count > 0 else 0
     if total == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets_valid)
+        return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets_valid, rows=dense_rows)
 
     kernels = get_kernels(cp)
     merge_count_kernel = kernels[3]
@@ -181,7 +204,7 @@ def _dilate_interval_set_horizontal_clamp(
     total_out = int(out_offsets[-1].item()) if row_count > 0 else 0
     if total_out == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=out_offsets)
+        return IntervalSet(begin=zero, end=zero, row_offsets=out_offsets, rows=dense_rows)
 
     out_begin = cp.empty(total_out, dtype=cp.int32)
     out_end = cp.empty(total_out, dtype=cp.int32)
@@ -200,7 +223,7 @@ def _dilate_interval_set_horizontal_clamp(
         ),
     )
 
-    return IntervalSet(begin=out_begin, end=out_end, row_offsets=out_offsets)
+    return IntervalSet(begin=out_begin, end=out_end, row_offsets=out_offsets, rows=dense_rows)
 
 
 def _dilate_interval_set_generic(
@@ -216,13 +239,21 @@ def _dilate_interval_set_generic(
 
     row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
     row_count = int(row_offsets.size - 1)
+    rows_layout = interval_set.rows_index()
+    if rows_layout.size != row_count:
+        raise ValueError("interval_set rows mismatch with row_offsets")
+    if row_count != height:
+        raise ValueError("interval_set row count must match provided height")
+    if row_count > 0 and not bool(cp.all(rows_layout == cp.arange(row_count, dtype=cp.int32))):
+        raise ValueError("clamp/wrap dilation requires dense row indexing")
 
     if interval_set.begin.size == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(height + 1, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        rows_dense = cp.arange(height, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_dense)
 
-    base_rows = _row_ids(row_offsets)
+    base_rows = _row_ids(interval_set)
     begin = interval_set.begin.astype(cp.int32, copy=True)
     end = interval_set.end.astype(cp.int32, copy=True)
 
@@ -287,13 +318,15 @@ def _dilate_interval_set_generic(
     if not rows_acc:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(height + 1, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        rows_dense = cp.arange(height, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_dense)
 
     rows_all = cp.concatenate(rows_acc)
     begin_all = cp.concatenate(begin_acc)
     end_all = cp.concatenate(end_acc)
 
-    dilated = _build_interval_set_from_rows(rows_all, begin_all, end_all, height)
+    rows_hint = cp.arange(height, dtype=cp.int32)
+    dilated = _build_interval_set_from_rows(rows_all, begin_all, end_all, rows_hint=rows_hint)
     return _clone_interval_set(dilated)
 
 
@@ -322,13 +355,19 @@ def _dilate_interval_set_vertical_clamp(
 
     row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
     row_count = int(row_offsets.size - 1)
+    rows_layout = interval_set.rows_index()
     if row_count != height:
         raise ValueError("interval_set row count must match provided height")
+    if rows_layout.size != row_count:
+        raise ValueError("interval_set rows mismatch with provided height")
+    if row_count > 0 and not bool(cp.all(rows_layout == cp.arange(row_count, dtype=cp.int32))):
+        raise ValueError("vertical clamp requires dense row indexing")
 
     if row_count == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(1, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        rows_dense = cp.zeros(0, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_dense)
 
     begin = interval_set.begin.astype(cp.int32, copy=False)
     end = interval_set.end.astype(cp.int32, copy=False)
@@ -362,7 +401,8 @@ def _dilate_interval_set_vertical_clamp(
     total = int(out_offsets[-1].item()) if row_count > 0 else 0
     if total == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=out_offsets)
+        rows_dense = cp.arange(row_count, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=out_offsets, rows=rows_dense)
 
     out_begin = cp.empty(total, dtype=cp.int32)
     out_end = cp.empty(total, dtype=cp.int32)
@@ -382,7 +422,48 @@ def _dilate_interval_set_vertical_clamp(
         ),
     )
 
-    return IntervalSet(begin=out_begin, end=out_end, row_offsets=out_offsets)
+    rows_dense = cp.arange(row_count, dtype=cp.int32)
+    return IntervalSet(begin=out_begin, end=out_end, row_offsets=out_offsets, rows=rows_dense)
+
+
+def _dilate_interval_set_unbounded(
+    interval_set: IntervalSet,
+    *,
+    halo_x: int,
+    halo_y: int,
+) -> IntervalSet:
+    cp = _require_cupy()
+    if halo_x == 0 and halo_y == 0:
+        return _clone_interval_set(interval_set)
+
+    begin = interval_set.begin.astype(cp.int32, copy=True)
+    end = interval_set.end.astype(cp.int32, copy=True)
+    rows_per_interval = interval_set.interval_rows()
+
+    if halo_x > 0:
+        begin = begin - halo_x
+        end = end + halo_x
+
+    if rows_per_interval.size == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        row_count = interval_set.row_count
+        offsets = cp.zeros(row_count + 1, dtype=cp.int32)
+        rows_arr = interval_set.rows_index() if row_count > 0 else cp.zeros(0, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_arr)
+
+    if halo_y == 0:
+        rows_hint = interval_set.rows_index()
+        dilated = _build_interval_set_from_rows(rows_per_interval, begin, end, rows_hint=rows_hint)
+        return _clone_interval_set(dilated)
+
+    shifts = cp.arange(-halo_y, halo_y + 1, dtype=cp.int32)
+    rows_all = rows_per_interval[:, None] + shifts[None, :]
+    rows_all = rows_all.reshape(-1)
+    begin_all = cp.repeat(begin, shifts.size)
+    end_all = cp.repeat(end, shifts.size)
+
+    dilated = _build_interval_set_from_rows(rows_all, begin_all, end_all)
+    return _clone_interval_set(dilated)
 
 
 def dilate_interval_set(
@@ -390,7 +471,7 @@ def dilate_interval_set(
     halo_x: int = 1,
     halo_y: int = 1,
     *,
-    width: int,
+    width: int | None = None,
     height: int | None = None,
     bc: str = "clamp",
 ) -> IntervalSet:
@@ -407,15 +488,24 @@ def dilate_interval_set(
         Domain width.
     height : int, optional
         Domain height. Defaults to the row count of ``interval_set``.
-    bc : {"clamp", "wrap"}
-        Boundary condition along both axes. ``"wrap"`` performs toroidal wrap;
-        ``"clamp"`` clips at the domain edges.
+    bc : {"clamp", "wrap", "none"}
+        Boundary condition. ``"wrap"`` performs toroidal wrap, ``"clamp"`` clips
+        at domain edges, and ``"none"`` performs an unbounded dilation (no domain
+        required).
     """
 
-    if bc not in {"clamp", "wrap"}:
-        raise ValueError("bc must be 'clamp' or 'wrap'")
+    if bc not in {"clamp", "wrap", "none"}:
+        raise ValueError("bc must be 'clamp', 'wrap', or 'none'")
     if halo_x < 0 or halo_y < 0:
         raise ValueError("halo_x and halo_y must be non-negative")
+
+    if bc == "none":
+        if width is not None or height is not None:
+            raise ValueError("width/height must be omitted when bc='none'")
+        return _dilate_interval_set_unbounded(interval_set, halo_x=halo_x, halo_y=halo_y)
+
+    if width is None:
+        raise ValueError("width must be provided for clamp/wrap dilation")
 
     cp = _require_cupy()
     row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
@@ -499,11 +589,12 @@ def full_interval_set(width: int, height: int) -> IntervalSet:
     if height <= 0 or width <= 0:
         offsets = cp.zeros(1, dtype=cp.int32)
         zero = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=zero)
     begin = cp.zeros(height, dtype=cp.int32)
     end = cp.full(height, width, dtype=cp.int32)
     row_offsets = cp.arange(height + 1, dtype=cp.int32)
-    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+    rows = cp.arange(height, dtype=cp.int32)
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets, rows=rows)
 
 
 def erode_interval_set(

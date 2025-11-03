@@ -104,6 +104,30 @@ class MorphologyTest(unittest.TestCase):
         self.assertEqual(rows[1], [(1, 5)])
         self.assertEqual(rows[2], [(1, 2), (3, 4)])
 
+    def test_dilate_unbounded_preserves_sparse_rows(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1],
+            begin=[5],
+            end=[7],
+            rows=[10],
+        )
+        dilated = dilate_interval_set(base, halo_x=2, halo_y=1, bc="none")
+        rows = _rows_to_python(dilated, self.cp)
+        row_ids = self.cp.asnumpy(dilated.rows_index()).tolist()
+        self.assertEqual(row_ids, [9, 10, 11])
+        self.assertEqual(rows[0], [(3, 9)])
+        self.assertEqual(rows[1], [(3, 9)])
+        self.assertEqual(rows[2], [(3, 9)])
+
+    def test_dilate_none_requires_no_domain(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1],
+            begin=[1],
+            end=[2],
+        )
+        with self.assertRaises(ValueError):
+            dilate_interval_set(base, halo_x=1, halo_y=0, width=4, bc="none")
+
 
 if __name__ == "__main__":
     unittest.main()

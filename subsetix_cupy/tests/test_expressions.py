@@ -78,11 +78,16 @@ class ExpressionTest(unittest.TestCase):
             row_offsets=[0, 2, 5],
         )
 
-    def test_union_requires_matching_rows(self) -> None:
+    def test_union_aligns_sparse_rows(self) -> None:
         extra = build_interval_set(row_offsets=[0, 1], begin=[0], end=[1])
         expr = make_union(make_input(self.surface_a), make_input(extra))
-        with self.assertRaises(ValueError):
-            evaluate(expr)
+        result = evaluate(expr)
+        self._assert_interval_set(
+            result,
+            begin=[0, 6, 1],
+            end=[4, 9, 5],
+            row_offsets=[0, 2, 3],
+        )
 
     def test_difference_handles_empty_rhs(self) -> None:
         empty = build_interval_set(row_offsets=[0, 0, 0], begin=[], end=[])
@@ -93,6 +98,21 @@ class ExpressionTest(unittest.TestCase):
             begin=[0, 6, 1],
             end=[4, 9, 5],
             row_offsets=[0, 2, 3],
+        )
+
+    def test_union_sparse_row_ids(self) -> None:
+        lhs = build_interval_set(row_offsets=[0, 1], begin=[0], end=[2], rows=[5])
+        rhs = build_interval_set(row_offsets=[0, 1], begin=[3], end=[4], rows=[7])
+        expr = make_union(make_input(lhs), make_input(rhs))
+        result = evaluate(expr)
+        cp = _REAL_CUPY
+        assert cp is not None
+        np.testing.assert_array_equal(cp.asnumpy(result.rows_index()), np.array([5, 7], dtype=np.int32))
+        self._assert_interval_set(
+            result,
+            begin=[0, 3],
+            end=[2, 4],
+            row_offsets=[0, 1, 2],
         )
 
     def test_symmetric_difference(self) -> None:

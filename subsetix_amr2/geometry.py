@@ -29,6 +29,7 @@ def _clone_interval_set(interval_set: IntervalSet) -> IntervalSet:
         begin=cp_mod.array(interval_set.begin, dtype=cp_mod.int32, copy=True),
         end=cp_mod.array(interval_set.end, dtype=cp_mod.int32, copy=True),
         row_offsets=cp_mod.array(interval_set.row_offsets, dtype=cp_mod.int32, copy=True),
+        rows=cp_mod.array(interval_set.rows, dtype=cp_mod.int32, copy=True) if interval_set.rows is not None else None,
     )
 
 
