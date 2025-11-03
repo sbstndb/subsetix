@@ -23,7 +23,7 @@ Frame = Tuple[int, cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]
 
 
 def capture_frame(state: AMRState, step: int) -> Frame:
-    refine_mask = state.refine_mask
+    refine_mask = state.refine.coarse
     coarse_only = interval_set_to_mask(state.geometry.coarse_only, refine_mask.shape[1])
     return (
         step,
@@ -40,7 +40,7 @@ def render(state: AMRState, dt: float, frames: List[Frame], *, animate: bool, pl
     if plt is None or mcolors is None:
         raise RuntimeError("matplotlib is required for plotting/animation")
 
-    refined_mask = state.refine_mask
+    refined_mask = state.refine.coarse
     coarse_only_mask = interval_set_to_mask(state.geometry.coarse_only, refined_mask.shape[1])
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
@@ -99,4 +99,3 @@ def render(state: AMRState, dt: float, frames: List[Frame], *, animate: bool, pl
         print(f"Saved animation to {save_animation}")
     elif plot:
         plt.show()
-
