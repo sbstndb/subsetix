@@ -24,8 +24,7 @@ from .fields import (
 from .geometry import TwoLevelGeometry
 from .regrid import (
     enforce_two_level_grading_set,
-    gradient_magnitude,
-    gradient_tag_threshold_set,
+    gradient_tag_threshold_interval_field,
 )
 from subsetix_cupy.expressions import IntervalSet
 from subsetix_cupy.interval_field import IntervalField, create_interval_field
@@ -214,8 +213,7 @@ class AMR2Simulation:
         if int(coarse_field.values.size) != width * height:
             raise ValueError("coarse_field must hold width * height cells")
 
-        coarse_grid = coarse_field.values.reshape(height, width)
-        refine_set = self._refine_from_gradient(coarse_grid)
+        refine_set = self._refine_from_gradient(coarse_field)
         actions = ActionField.full_grid(height, width, self.config.ratio, default=Action.KEEP)
         actions.set_from_interval_set(refine_set)
         geometry = self._build_geometry(actions)
@@ -290,9 +288,13 @@ class AMR2Simulation:
         for cb in callbacks:
             cb(state, stats)
 
-    def _refine_from_gradient(self, field: cp.ndarray) -> IntervalSet:
-        grad = gradient_magnitude(field)
-        tagged = gradient_tag_threshold_set(grad, self.config.refine_threshold)
+    def _refine_from_gradient(self, field: IntervalField) -> IntervalSet:
+        tagged = gradient_tag_threshold_interval_field(
+            field,
+            width=self.width,
+            height=self.height,
+            threshold=self.config.refine_threshold,
+        )
         graded = enforce_two_level_grading_set(
             tagged,
             padding=self.config.grading,
@@ -319,7 +321,7 @@ class AMR2Simulation:
 
     def _update_geometry(self) -> None:
         state = self._require_state()
-        refine_set = self._refine_from_gradient(state.coarse)
+        refine_set = self._refine_from_gradient(state.coarse_field)
         state.actions.set_from_interval_set(refine_set)
         workspace = state.geometry.workspace if state.geometry is not None else None
         geometry = self._build_geometry(state.actions, workspace=workspace)

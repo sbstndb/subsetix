@@ -12,7 +12,10 @@ from .fields import (
     synchronize_interval_fields,
 )
 from .geometry import TwoLevelGeometry
-from .regrid import enforce_two_level_grading_set, gradient_magnitude, gradient_tag_threshold_set
+from .regrid import (
+    enforce_two_level_grading_set,
+    gradient_tag_threshold_interval_field,
+)
 from subsetix_cupy.expressions import IntervalSet
 from subsetix_cupy.morphology import full_interval_set
 from subsetix_cupy.interval_field import IntervalField, create_interval_field
@@ -198,9 +201,12 @@ class MRAdaptor:
             raise RuntimeError("mesh geometry not initialised")
         height = geometry.height
         width = geometry.width
-        coarse = self.field.coarse_field.values.reshape(height, width)
-        grad = gradient_magnitude(coarse)
-        tags_set = gradient_tag_threshold_set(grad, self.refine_threshold)
+        tags_set = gradient_tag_threshold_interval_field(
+            self.field.coarse_field,
+            width=width,
+            height=height,
+            threshold=self.refine_threshold,
+        )
         graded_set = enforce_two_level_grading_set(
             tags_set,
             padding=self.grading,
