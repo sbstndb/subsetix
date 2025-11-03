@@ -6,7 +6,6 @@ from subsetix_amr2.simulation import (
     SimulationStats,
     create_square_field,
 )
-from subsetix_amr2.geometry import interval_set_to_mask
 import cupy as cp
 
 
@@ -30,9 +29,9 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(state.coarse.shape, (16, 16))
         self.assertEqual(state.fine.shape, (32, 32))
         refine_set = state.actions.refine_set()
-        refine_mask = interval_set_to_mask(refine_set, state.actions.width)
-        self.assertEqual(refine_mask.shape, (16, 16))
-        self.assertEqual(refine_mask.dtype, cp.bool_)
+        self.assertEqual(refine_set.row_offsets.size, state.actions.height + 1)
+        self.assertEqual(refine_set.begin.dtype, cp.int32)
+        self.assertEqual(refine_set.end.dtype, cp.int32)
         self.assertEqual(state.geometry.ratio, config.ratio)
 
     def test_run_invokes_callbacks(self) -> None:

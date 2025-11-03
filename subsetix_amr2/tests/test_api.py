@@ -1,7 +1,6 @@
 import unittest
 
 from subsetix_amr2.api import Box, MRAdaptor, TwoLevelMesh, make_scalar_field
-from subsetix_amr2.geometry import interval_set_to_mask
 from subsetix_cupy.expressions import _REAL_CUPY
 
 
@@ -24,8 +23,8 @@ class TwoLevelAPITest(unittest.TestCase):
         self.assertIsNotNone(mesh.geometry)
         geom = mesh.geometry
         assert geom is not None
-        refine_mask = interval_set_to_mask(geom.refine, geom.width)
-        self.assertEqual(refine_mask.shape, field.coarse.shape)
+        self.assertEqual(geom.refine.row_offsets.size, field.coarse.shape[0] + 1)
+        self.assertEqual(geom.refine.begin.dtype, self.cp.int32)
         self.assertAlmostEqual(mesh.cell_length(0), 1.0 / 8.0, places=6)
         self.assertAlmostEqual(mesh.cell_length(1), 1.0 / 16.0, places=6)
 

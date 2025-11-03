@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Sequence
+import math
 
 import cupy as cp
 
@@ -63,18 +64,29 @@ def create_square_field(
         raise ValueError("at least one SquareSpec is required")
 
     arr = cp.zeros((height, width), dtype=dtype)
-    xx = cp.linspace(0.0, 1.0, width, dtype=cp.float32)
-    yy = cp.linspace(0.0, 1.0, height, dtype=cp.float32)
-    X, Y = cp.meshgrid(xx, yy)
+    # For grids with a single cell we simply fill the whole array when needed.
+    x_scale = width - 1 if width > 1 else 1
+    y_scale = height - 1 if height > 1 else 1
 
     for spec in squares:
         cx, cy = spec.center
         hx, hy = spec.half_width
-        mask = (cp.abs(X - cx) <= hx) & (cp.abs(Y - cy) <= hy)
-        if spec.value != 1.0:
-            arr = cp.where(mask, cp.asarray(spec.value, dtype=dtype), arr)
-        else:
-            arr = cp.where(mask, cp.asarray(1.0, dtype=dtype), arr)
+
+        x_lower = (cx - hx) * x_scale
+        x_upper = (cx + hx) * x_scale
+        y_lower = (cy - hy) * y_scale
+        y_upper = (cy + hy) * y_scale
+
+        x0 = max(0, min(width - 1, math.ceil(x_lower)))
+        x1 = max(0, min(width - 1, math.floor(x_upper)))
+        y0 = max(0, min(height - 1, math.ceil(y_lower)))
+        y1 = max(0, min(height - 1, math.floor(y_upper)))
+
+        if x0 > x1 or y0 > y1:
+            continue
+
+        value = float(spec.value)
+        arr[y0 : y1 + 1, x0 : x1 + 1] = value
     return arr.astype(dtype, copy=False)
 
 

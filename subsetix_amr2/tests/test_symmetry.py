@@ -1,10 +1,30 @@
 import unittest
 
+from subsetix_amr2.fields import prolong_coarse_to_fine
 from subsetix_amr2.runner import SimulationArgs, run_two_level_simulation
 from subsetix_amr2.simulation import SquareSpec, create_square_field
-from subsetix_amr2.fields import prolong_coarse_to_fine
-from subsetix_amr2.geometry import interval_set_to_mask
-from subsetix_cupy.expressions import _REAL_CUPY
+from subsetix_cupy.expressions import IntervalSet, _REAL_CUPY
+
+
+def _cells_from_interval_set(interval_set: IntervalSet):
+    begin = interval_set.begin.get()
+    end = interval_set.end.get()
+    offsets = interval_set.row_offsets.get()
+    height = offsets.size - 1
+    cells = set()
+    for row in range(height):
+        start = int(offsets[row])
+        stop = int(offsets[row + 1])
+        for idx in range(start, stop):
+            for col in range(int(begin[idx]), int(end[idx])):
+                cells.add((row, col))
+    return cells
+
+
+def _is_symmetric(interval_set: IntervalSet) -> bool:
+    cells = _cells_from_interval_set(interval_set)
+    mirrored = {(c, r) for (r, c) in cells}
+    return cells == mirrored
 
 
 @unittest.skipUnless(_REAL_CUPY is not None, "CuPy backend with CUDA required")
@@ -38,18 +58,15 @@ class SymmetryTest(unittest.TestCase):
         coarse, fine = field.as_arrays()
         geom = field.mesh.geometry
         assert geom is not None
-        refine_mask = interval_set_to_mask(geom.refine, geom.width)
-        coarse_only = interval_set_to_mask(geom.coarse_only, geom.width)
-        fine_mask = interval_set_to_mask(geom.fine, geom.width * geom.ratio)
 
         def _max_diff(arr):
             return float(self.cp.max(self.cp.abs(arr - arr.T)).item())
 
         self.assertLess(_max_diff(coarse), 1e-5)
         self.assertLess(_max_diff(fine), 1e-5)
-        self.assertFalse(bool(self.cp.any(refine_mask != refine_mask.T)))
-        self.assertFalse(bool(self.cp.any(coarse_only != coarse_only.T)))
-        self.assertFalse(bool(self.cp.any(fine_mask != fine_mask.T)))
+        self.assertTrue(_is_symmetric(geom.refine))
+        self.assertTrue(_is_symmetric(geom.coarse_only))
+        self.assertTrue(_is_symmetric(geom.fine))
 
 
 if __name__ == "__main__":
