@@ -15,7 +15,8 @@ import cupy as cp
 
 from .api import Box, MRAdaptor, ScalarField, TwoLevelMesh, make_scalar_field
 from .export import save_two_level_vtk
-from .fields import synchronize_two_level
+from .fields import synchronize_interval_fields
+from .simulation import _step_upwind
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,6 @@ class SimulationArgs:
     grading: int = 1
     grading_mode: str = "von_neumann"
     output: OutputOptions | None = None
-    bc: str = "clamp"
 
 
 def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
@@ -68,12 +68,6 @@ def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
         type=str,
         choices=["von_neumann", "moore"],
         default="von_neumann",
-    )
-    parser.add_argument(
-        "--bc",
-        type=str,
-        choices=["clamp", "wrap"],
-        default="clamp",
     )
     parser.add_argument("--vtk-dir", type=Path, default=None, help="Directory for VTK outputs")
     parser.add_argument("--vtk-prefix", type=str, default="amr2")
@@ -102,7 +96,6 @@ def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
         grading=int(ns.grading),
         grading_mode=ns.grading_mode,
         output=output,
-        bc=ns.bc,
     )
     _validate_args(args)
     return args
@@ -132,33 +125,20 @@ def update_ghost(field: ScalarField) -> None:
     geometry = field.mesh.geometry
     if geometry is None:
         raise RuntimeError("mesh geometry not initialised")
-    coarse, fine = synchronize_two_level(
-        field.coarse,
-        field.fine,
-        geometry.refine,
+    actions = field.mesh.actions
+    if actions is None:
+        raise RuntimeError("mesh actions not initialised")
+    coarse_field = field.coarse_field
+    fine_field = field.fine_field
+    synchronize_interval_fields(
+        coarse_field,
+        fine_field,
+        actions,
         ratio=field.mesh.ratio,
         reducer="mean",
         fill_fine_outside=True,
         copy=False,
     )
-    field.coarse = coarse
-    field.fine = fine
-
-
-def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: float, bc: str) -> cp.ndarray:
-    if bc == "wrap":
-        left = cp.roll(u, 1, axis=1)
-        right = cp.roll(u, -1, axis=1)
-        down = cp.roll(u, 1, axis=0)
-        up = cp.roll(u, -1, axis=0)
-    else:
-        left = cp.concatenate([u[:, :1], u[:, :-1]], axis=1)
-        right = cp.concatenate([u[:, 1:], u[:, -1:]], axis=1)
-        down = cp.concatenate([u[:1, :], u[:-1, :]], axis=0)
-        up = cp.concatenate([u[1:, :], u[-1:, :]], axis=0)
-    du_dx = (u - left) / dx if a >= 0 else (right - u) / dx
-    du_dy = (u - down) / dy if b >= 0 else (up - u) / dy
-    return u - dt * (a * du_dx + b * du_dy)
 
 
 def save_snapshot(
@@ -168,7 +148,6 @@ def save_snapshot(
     step: int,
     *,
     time_value: float,
-    bc: str,
 ) -> None:
     geometry = mesh.geometry
     if geometry is None:
@@ -187,7 +166,6 @@ def save_snapshot(
         ratio=mesh.ratio,
         time_value=time_value,
         ghost_halo=output.ghost_halo,
-        bc=bc,
     )
 
 
@@ -225,7 +203,7 @@ def run_two_level_simulation(
 
     if args.output is not None:
         args.output.directory.mkdir(parents=True, exist_ok=True)
-        save_snapshot(args.output, mesh, field, 0, time_value=args.t0, bc=args.bc)
+        save_snapshot(args.output, mesh, field, 0, time_value=args.t0)
 
     unp1 = make_scalar_field("unp1", mesh)
     t = args.t0
@@ -236,13 +214,13 @@ def run_two_level_simulation(
         update_ghost(field)
 
         unp1.resize()
-        unp1.coarse[...] = _step_upwind(field.coarse, a, b, dt_step, dx0, dy0, args.bc)
-        unp1.fine[...] = _step_upwind(field.fine, a, b, dt_step, dx1, dy1, args.bc)
+        unp1.coarse[...] = _step_upwind(field.coarse, a, b, dt_step, dx0, dy0)
+        unp1.fine[...] = _step_upwind(field.fine, a, b, dt_step, dx1, dy1)
         field.swap(unp1)
 
         t = min(args.tf, t + dt_step)
         step += 1
         if args.output is not None and (step % args.output.every == 0 or math.isclose(t, args.tf)):
-            save_snapshot(args.output, mesh, field, step, time_value=t, bc=args.bc)
+            save_snapshot(args.output, mesh, field, step, time_value=t)
 
     return field

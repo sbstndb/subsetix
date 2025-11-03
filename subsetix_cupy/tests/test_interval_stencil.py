@@ -10,15 +10,31 @@ from subsetix_cupy import (
     interval_field_to_dense,
 )
 from subsetix_cupy.interval_stencil import (
-    step_upwind_dense_active,
-    step_upwind_dense_zero,
     step_upwind_interval,
     step_upwind_interval_field,
 )
 
 
+def _dense_upwind_zero(u: cp.ndarray, *, a: float, b: float, dt: float, dx: float, dy: float) -> cp.ndarray:
+    padded = cp.pad(u.astype(cp.float32, copy=False), ((1, 1), (1, 1)), mode="constant")
+    center = padded[1:-1, 1:-1]
+    left = padded[1:-1, :-2]
+    right = padded[1:-1, 2:]
+    down = padded[:-2, 1:-1]
+    up = padded[2:, 1:-1]
+    if a >= 0.0:
+        du_dx = (center - left) / dx
+    else:
+        du_dx = (right - center) / dx
+    if b >= 0.0:
+        du_dy = (center - down) / dy
+    else:
+        du_dy = (up - center) / dy
+    return center - dt * (a * du_dx + b * du_dy)
+
+
 class IntervalStencilTest(unittest.TestCase):
-    def test_upwind_matches_dense(self) -> None:
+    def test_upwind_matches_zero_padded_dense(self) -> None:
         width = 64
         height = 64
         x0, x1 = 16, 48
@@ -72,12 +88,9 @@ class IntervalStencilTest(unittest.TestCase):
         dx = 1.0 / width
         dy = 1.0 / height
 
-        dense_out = step_upwind_dense_zero(dense, a=a, b=b, dt=dt, dx=dx, dy=dy)
-        dense_active = step_upwind_dense_active(
-            dense,
-            row_ids=row_ids,
-            begin=interval_set.begin,
-            end=interval_set.end,
+        dense_out = _dense_upwind_zero(dense, a=a, b=b, dt=dt, dx=dx, dy=dy)
+        interval_zero = step_upwind_interval_field(
+            field,
             width=width,
             height=height,
             a=a,
@@ -86,6 +99,19 @@ class IntervalStencilTest(unittest.TestCase):
             dx=dx,
             dy=dy,
         )
+        dense_zero_from_interval = interval_field_to_dense(
+            interval_zero,
+            width=width,
+            height=height,
+            fill_value=0.0,
+        )
+        cp.testing.assert_allclose(
+            dense_out[mask],
+            dense_zero_from_interval[mask],
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
         interval_out_field = step_upwind_interval_field(
             field,
             width=width,
@@ -121,12 +147,6 @@ class IntervalStencilTest(unittest.TestCase):
 
         cp.testing.assert_allclose(
             dense_out[mask],
-            dense_from_interval[mask],
-            rtol=1e-6,
-            atol=1e-6,
-        )
-        cp.testing.assert_allclose(
-            dense_active[mask],
             dense_from_interval[mask],
             rtol=1e-6,
             atol=1e-6,

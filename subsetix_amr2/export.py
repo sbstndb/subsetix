@@ -7,8 +7,15 @@ import cupy as cp
 import numpy as np
 
 from subsetix_cupy.export_vtk import write_rectilinear_grid_vtr, write_unstructured_quads_vtu
-from subsetix_cupy.morphology import ghost_zones
-from subsetix_cupy.expressions import IntervalSet, _require_cupy
+from subsetix_cupy.morphology import dilate_interval_set, clip_interval_set
+from subsetix_cupy.expressions import (
+    IntervalSet,
+    _require_cupy,
+    evaluate,
+    make_difference,
+    make_input,
+    make_intersection,
+)
 
 from .geometry import interval_set_to_mask
 
@@ -20,20 +27,18 @@ def _ensure_bool(arr: cp.ndarray) -> cp.ndarray:
     return arr.astype(cp_mod.bool_, copy=False)
 
 
-def _ghost_mask(interval_set, width: int, height: int, halo_x: int, halo_y: int, bc: str) -> cp.ndarray:
+def _ghost_mask(interval_set, width: int, height: int, halo_x: int, halo_y: int) -> cp.ndarray:
     cp_mod = _require_cupy()
     if halo_x <= 0 and halo_y <= 0:
         return cp_mod.zeros((height, width), dtype=cp_mod.bool_)
-    ghost = ghost_zones(
+    dilated = dilate_interval_set(
         interval_set,
         halo_x=max(0, halo_x),
         halo_y=max(0, halo_y),
-        width=width,
-        height=height,
-        bc=bc,
     )
-    if int(ghost.begin.size) == 0:
-        return cp_mod.zeros((height, width), dtype=cp_mod.bool_)
+    clipped = clip_interval_set(dilated, width=width, height=height)
+    base = clip_interval_set(interval_set, width=width, height=height)
+    ghost = evaluate(make_difference(make_input(clipped), make_input(base)))
     return interval_set_to_mask(ghost, width).astype(cp_mod.bool_, copy=False)
 
 
@@ -52,7 +57,6 @@ def save_two_level_vtk(
     ratio: int = 2,
     time_value: float = 0.0,
     ghost_halo: int = 1,
-    bc: str = "clamp",
 ) -> Dict[str, str]:
     """
     Save VTK files (two rectilinear grids + combined unstructured mesh) for a two-level AMR snapshot.
@@ -75,7 +79,6 @@ def save_two_level_vtk(
         height=height,
         halo_x=ghost_halo,
         halo_y=ghost_halo,
-        bc=bc,
     )
     fine_ghost_mask = _ghost_mask(
         fine_set,
@@ -83,7 +86,6 @@ def save_two_level_vtk(
         height=fine_height,
         halo_x=max(0, ghost_halo * ratio),
         halo_y=max(0, ghost_halo * ratio),
-        bc=bc,
     )
 
     os.makedirs(out_dir, exist_ok=True)

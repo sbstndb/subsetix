@@ -37,7 +37,6 @@ def run_demo(args: argparse.Namespace):
         refine_threshold=float(args.refine_threshold),
         grading=int(args.grading),
         grading_mode=args.grading_mode,
-        bc=args.bc,
         ratio=ratio,
     )
     sim = AMR2Simulation(config)
@@ -50,7 +49,6 @@ def run_demo(args: argparse.Namespace):
             prefix=args.vtk_prefix,
             every=args.vtk_every,
             ghost_halo=args.ghost_halo,
-            bc=args.bc,
         )
 
         def _vtk_callback(state: AMRState, stats: SimulationStats) -> None:
@@ -110,7 +108,6 @@ def create_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--velocity", type=float, nargs=2, default=[0.6, 0.6], metavar=("a", "b"))
     ap.add_argument("--cfl", type=float, default=0.9, help="Courant number based on fine spacing")
-    ap.add_argument("--bc", type=str, default="clamp", choices=["clamp", "wrap"], help="Boundary condition")
     ap.add_argument(
         "--square-amp",
         type=float,

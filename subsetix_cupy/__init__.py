@@ -33,12 +33,11 @@ from .morphology import (
     erode_interval_set,
     full_interval_set,
     ghost_zones,
+    clip_interval_set,
 )
 from .interval_stencil import (
     step_upwind_interval,
     step_upwind_interval_field,
-    step_upwind_dense_zero,
-    step_upwind_dense_active,
 )
 
 __all__ = [
@@ -74,8 +73,7 @@ __all__ = [
     "erode_interval_set",
     "ghost_zones",
     "full_interval_set",
+    "clip_interval_set",
     "step_upwind_interval",
     "step_upwind_interval_field",
-    "step_upwind_dense_zero",
-    "step_upwind_dense_active",
 ]

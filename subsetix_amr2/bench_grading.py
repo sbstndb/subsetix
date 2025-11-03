@@ -17,7 +17,7 @@ from subsetix_amr2.regrid import (
     gradient_tag_threshold_set,
 )
 from subsetix_cupy import evaluate, make_input, make_union
-from subsetix_cupy.morphology import dilate_interval_set
+from subsetix_cupy.morphology import dilate_interval_set, clip_interval_set
 
 
 def _format_stats(values):
@@ -55,7 +55,6 @@ def run_benchmark(
     gradients = cp.random.random((size, size), dtype=cp.float32)
     refine_set = gradient_tag_threshold_set(gradients, threshold)
     cp.cuda.runtime.deviceSynchronize()
-
     enforce_times = []
     horiz_times = []
     vert_times = []
@@ -78,13 +77,14 @@ def run_benchmark(
 
         if mode == "moore":
             expanded, dilate_time = _timed_call(
-                lambda: dilate_interval_set(
-                    refine_set,
-                    halo_x=padding,
-                    halo_y=padding,
+                lambda: clip_interval_set(
+                    dilate_interval_set(
+                        refine_set,
+                        halo_x=padding,
+                        halo_y=padding,
+                    ),
                     width=size,
                     height=size,
-                    bc="clamp",
                 )
             )
             dilate_times.append(dilate_time)
@@ -96,24 +96,26 @@ def run_benchmark(
             union_times.append(union_time)
         else:
             horiz, horiz_time = _timed_call(
-                lambda: dilate_interval_set(
-                    refine_set,
-                    halo_x=padding,
-                    halo_y=0,
+                lambda: clip_interval_set(
+                    dilate_interval_set(
+                        refine_set,
+                        halo_x=padding,
+                        halo_y=0,
+                    ),
                     width=size,
                     height=size,
-                    bc="clamp",
                 )
             )
             horiz_times.append(horiz_time)
             vert, vert_time = _timed_call(
-                lambda: dilate_interval_set(
-                    refine_set,
-                    halo_x=0,
-                    halo_y=padding,
+                lambda: clip_interval_set(
+                    dilate_interval_set(
+                        refine_set,
+                        halo_x=0,
+                        halo_y=padding,
+                    ),
                     width=size,
                     height=size,
-                    bc="clamp",
                 )
             )
             vert_times.append(vert_time)

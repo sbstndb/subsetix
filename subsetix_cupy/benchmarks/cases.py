@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .. import (
     IntervalField,
@@ -20,10 +20,9 @@ from .. import (
     restrict_level_sets,
     restrict_set,
     interval_field_to_dense,
-    step_upwind_dense_active,
     step_upwind_interval,
 )
-from ..morphology import dilate_interval_set, erode_interval_set, ghost_zones
+from ..morphology import dilate_interval_set, erode_interval_set, ghost_zones, clip_interval_set
 from ..multilevel import coarse_only, covered_by_fine
 from ..expressions import _require_cupy
 from . import BenchmarkCase, BenchmarkTarget
@@ -38,6 +37,39 @@ from .utils import (
 SMALL_SPEC = GeometrySpec(rows=256, width=256, tiles_x=3, tiles_y=3, fill_ratio=0.8)
 LARGE_SPEC = GeometrySpec(rows=8192, width=8192, tiles_x=3, tiles_y=3, fill_ratio=0.8)
 RATIO = 2
+
+
+def _dense_upwind_zero(
+    field: Any,
+    *,
+    a: float,
+    b: float,
+    dt: float,
+    dx: float,
+    dy: float,
+    out: cp.ndarray | None = None,
+) -> cp.ndarray:
+    cp = _require_cupy()
+    base = cp.asarray(field, dtype=cp.float32, copy=False)
+    padded = cp.pad(base, ((1, 1), (1, 1)), mode="constant")
+    center = padded[1:-1, 1:-1]
+    left = padded[1:-1, :-2]
+    right = padded[1:-1, 2:]
+    down = padded[:-2, 1:-1]
+    up = padded[2:, 1:-1]
+    if a >= 0.0:
+        du_dx = (center - left) / dx
+    else:
+        du_dx = (right - center) / dx
+    if b >= 0.0:
+        du_dy = (center - down) / dy
+    else:
+        du_dy = (up - center) / dy
+    result = center - dt * (a * du_dx + b * du_dy)
+    if out is not None:
+        out[...] = result
+        return out
+    return result
 STENCIL_SMALL = GeometrySpec(rows=512, width=512, tiles_x=1, tiles_y=1, fill_ratio=0.65)
 STENCIL_LARGE = GeometrySpec(rows=2048, width=2048, tiles_x=1, tiles_y=1, fill_ratio=0.65)
 
@@ -119,7 +151,6 @@ def _build_morph_case(
     spec: GeometrySpec,
     halo_x: int,
     halo_y: int,
-    bc: str,
     op: str,
 ) -> BenchmarkCase:
     cp = _require_cupy()
@@ -127,15 +158,18 @@ def _build_morph_case(
     width = spec.width
     rows = spec.rows
     base_intervals = int(geometry.row_offsets[-1].item())
+    def _clip(result: IntervalSet) -> IntervalSet:
+        return clip_interval_set(result, width=width, height=rows)
 
     def _target_dilate():
-        dilate_interval_set(geometry, halo_x=halo_x, halo_y=halo_y, width=width, height=rows, bc=bc)
+        dilated = dilate_interval_set(geometry, halo_x=halo_x, halo_y=halo_y)
+        return _clip(dilated)
 
     def _target_ghost():
-        ghost_zones(geometry, halo_x=halo_x, halo_y=halo_y, width=width, height=rows, bc=bc)
+        return ghost_zones(geometry, halo_x=halo_x, halo_y=halo_y, width=width, height=rows)
 
     def _target_erode():
-        erode_interval_set(geometry, halo_x=halo_x, halo_y=halo_y, width=width, height=rows, bc=bc)
+        return erode_interval_set(geometry, halo_x=halo_x, halo_y=halo_y, width=width, height=rows)
 
     if op == "dilate":
         func = _target_dilate
@@ -151,10 +185,10 @@ def _build_morph_case(
         "rows": rows,
         "halo_x": halo_x,
         "halo_y": halo_y,
-        "bc": bc,
         "intervals": base_intervals,
         "operation": op,
         "input_intervals": base_intervals,
+        "boundary": "zero_exterior",
     }
     return BenchmarkCase(
         name=name,
@@ -255,21 +289,7 @@ def _build_stencil_case(
     dx = 1.0 / max(1, spec.width)
     dy = 1.0 / max(1, spec.rows)
 
-    dense_ref = cp.empty_like(dense)
-    step_upwind_dense_active(
-        dense,
-        row_ids=row_ids,
-        begin=interval_set.begin,
-        end=interval_set.end,
-        width=spec.width,
-        height=spec.rows,
-        a=a,
-        b=b,
-        dt=dt,
-        dx=dx,
-        dy=dy,
-        out=dense_ref,
-    )
+    dense_ref = _dense_upwind_zero(dense, a=a, b=b, dt=dt, dx=dx, dy=dy)
     interval_ref = cp.empty_like(field.values)
     step_upwind_interval(
         field,
@@ -321,13 +341,8 @@ def _build_stencil_case(
     active_cells = int(field.interval_cell_offsets[-1].item()) if field.interval_cell_offsets.size else 0
 
     if mode == "dense":
-        func = lambda: step_upwind_dense_active(
+        func = lambda: _dense_upwind_zero(
             dense,
-            row_ids=row_ids,
-            begin=interval_set.begin,
-            end=interval_set.end,
-            width=spec.width,
-            height=spec.rows,
             a=a,
             b=b,
             dt=dt,
@@ -343,6 +358,7 @@ def _build_stencil_case(
             "a": a,
             "b": b,
             "dt": dt,
+            "boundary": "zero_exterior",
         }
         input_count = active_cells
     elif mode == "interval":
@@ -366,6 +382,7 @@ def _build_stencil_case(
             "a": a,
             "b": b,
             "dt": dt,
+            "boundary": "zero_exterior",
         }
         input_count = active_cells
     else:
@@ -421,56 +438,50 @@ _CASES: List[BenchmarkCase] = [
     ),
     _build_morph_case(
         name="morph_dilate_small",
-        description="Morphological dilation (clamp BC, small domain)",
+        description="Morphological dilation (small domain)",
         spec=SMALL_SPEC,
         halo_x=4,
         halo_y=2,
-        bc="clamp",
         op="dilate",
     ),
     _build_morph_case(
         name="morph_dilate_large",
-        description="Morphological dilation (clamp BC, large domain)",
+        description="Morphological dilation (large domain)",
         spec=LARGE_SPEC,
         halo_x=4,
         halo_y=2,
-        bc="clamp",
         op="dilate",
     ),
     _build_morph_case(
         name="morph_ghost_small",
-        description="Ghost zone generation (wrap BC, small domain)",
+        description="Ghost zone generation (zero exterior, small domain)",
         spec=SMALL_SPEC,
         halo_x=3,
         halo_y=3,
-        bc="wrap",
         op="ghost",
     ),
     _build_morph_case(
         name="morph_ghost_large",
-        description="Ghost zone generation (wrap BC, large domain)",
+        description="Ghost zone generation (zero exterior, large domain)",
         spec=LARGE_SPEC,
         halo_x=3,
         halo_y=3,
-        bc="wrap",
         op="ghost",
     ),
     _build_morph_case(
         name="morph_erode_small",
-        description="Morphological erosion (clamp BC, small domain)",
+        description="Morphological erosion (small domain)",
         spec=SMALL_SPEC,
         halo_x=2,
         halo_y=2,
-        bc="clamp",
         op="erode",
     ),
     _build_morph_case(
         name="morph_erode_large",
-        description="Morphological erosion (clamp BC, large domain)",
+        description="Morphological erosion (large domain)",
         spec=LARGE_SPEC,
         halo_x=2,
         halo_y=2,
-        bc="clamp",
         op="erode",
     ),
     _build_multilevel_case(
@@ -547,7 +558,7 @@ _CASES: List[BenchmarkCase] = [
     ),
     _build_stencil_case(
         name="stencil_dense_square_small",
-        description="Dense upwind stencil (square mask, small domain)",
+        description="Dense upwind stencil (zero exterior, square mask, small domain)",
         spec=STENCIL_SMALL,
         mode="dense",
         variant="square",
@@ -561,7 +572,7 @@ _CASES: List[BenchmarkCase] = [
     ),
     _build_stencil_case(
         name="stencil_dense_square_large",
-        description="Dense upwind stencil (square mask, large domain)",
+        description="Dense upwind stencil (zero exterior, square mask, large domain)",
         spec=STENCIL_LARGE,
         mode="dense",
         variant="square",
@@ -575,7 +586,7 @@ _CASES: List[BenchmarkCase] = [
     ),
     _build_stencil_case(
         name="stencil_dense_stair_small",
-        description="Dense upwind stencil (staircase mask, small domain)",
+        description="Dense upwind stencil (zero exterior, staircase mask, small domain)",
         spec=STENCIL_SMALL,
         mode="dense",
         variant="staircase",
@@ -589,7 +600,7 @@ _CASES: List[BenchmarkCase] = [
     ),
     _build_stencil_case(
         name="stencil_dense_stair_large",
-        description="Dense upwind stencil (staircase mask, large domain)",
+        description="Dense upwind stencil (zero exterior, staircase mask, large domain)",
         spec=STENCIL_LARGE,
         mode="dense",
         variant="staircase",

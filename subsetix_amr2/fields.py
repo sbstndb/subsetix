@@ -36,6 +36,7 @@ _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
 _COPY_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 _FILL_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 _SUBSET_KERNEL_CACHE: Dict[tuple[str, str], cp.RawKernel] = {}
+_FULL_CELL_OFFSET_CACHE: Dict[tuple[int, int], cp.ndarray] = {}
 
 _ACTION_COUNT_KERNEL = cp.RawKernel(
     r"""
@@ -161,6 +162,17 @@ def _intervals_for_value(grid: cp.ndarray, target: int) -> IntervalSet:
 
 def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
     return interval_set.interval_rows().astype(cp.int32, copy=False)
+
+
+def _full_cell_offsets(width: int, height: int) -> cp.ndarray:
+    key = (height, width)
+    cached = _FULL_CELL_OFFSET_CACHE.get(key)
+    if cached is not None:
+        return cached
+    cp_mod = _require_cupy()
+    offsets = cp_mod.arange(height + 1, dtype=cp_mod.int32) * width
+    _FULL_CELL_OFFSET_CACHE[key] = offsets
+    return offsets
 
 
 def _get_copy_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
@@ -560,6 +572,24 @@ def clone_interval_field(field: IntervalField) -> IntervalField:
         interval_set=field.interval_set,
         values=cp_mod.array(field.values, copy=True),
         interval_cell_offsets=field.interval_cell_offsets,
+    )
+
+
+def interval_field_from_dense(array: cp.ndarray) -> IntervalField:
+    if array.ndim != 2:
+        raise ValueError("array must be 2D")
+    height, width = array.shape
+    if height < 0 or width < 0:
+        raise ValueError("array dimensions must be non-negative")
+    cp_mod = _require_cupy()
+    data = array.astype(cp_mod.float32, copy=False)
+    values = data.reshape(-1)
+    interval_set = _full_action_interval_set(width, height)
+    offsets = _full_cell_offsets(width, height)
+    return IntervalField(
+        interval_set=interval_set,
+        values=values,
+        interval_cell_offsets=offsets,
     )
 
 

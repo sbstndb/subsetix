@@ -9,6 +9,7 @@ from subsetix_cupy import (
     CuPyWorkspace,
     IntervalSet,
     dilate_interval_set,
+    clip_interval_set,
     evaluate,
     make_difference,
     make_input,
@@ -176,36 +177,23 @@ class TwoLevelGeometry:
                 self.refine,
                 halo_x=halo,
                 halo_y=halo,
-                width=self.width,
-                height=self.height,
-                bc="clamp",
             )
         else:
             horiz = dilate_interval_set(
                 self.refine,
                 halo_x=halo,
                 halo_y=0,
-                width=self.width,
-                height=self.height,
-                bc="clamp",
             )
             vert = dilate_interval_set(
                 self.refine,
                 halo_x=0,
                 halo_y=halo,
-                width=self.width,
-                height=self.height,
-                bc="clamp",
             )
             dilated = evaluate(make_union(make_input(horiz), make_input(vert)), workspace=self.workspace)
-        dilated = _clone_interval_set(dilated)
-        merged = evaluate(make_union(make_input(dilated), make_input(self.refine)), workspace=self.workspace)
-        merged = _clone_interval_set(merged)
-        clipped_eval = evaluate(
-            make_intersection(make_input(self.coarse), make_input(merged)),
-            workspace=self.workspace,
-        )
-        clipped = _clone_interval_set(clipped_eval)
+        dilated = clip_interval_set(dilated, width=self.width, height=self.height)
+        refine_dense = clip_interval_set(self.refine, width=self.width, height=self.height)
+        merged = evaluate(make_union(make_input(dilated), make_input(refine_dense)), workspace=self.workspace)
+        clipped = clip_interval_set(merged, width=self.width, height=self.height)
         fine_set = prolong_set(clipped, self.ratio)
         coarse_only_expr = make_difference(make_input(self.coarse), make_input(clipped))
         coarse_only_set = evaluate(coarse_only_expr, workspace=self.workspace)

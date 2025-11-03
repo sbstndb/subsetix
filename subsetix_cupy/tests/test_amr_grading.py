@@ -44,23 +44,7 @@ def _prolong_repeat(arr: cp.ndarray, ratio: int) -> cp.ndarray:
     return result.astype(arr.dtype, copy=False)
 
 
-def _dilate_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
-    if wrap:
-        shifts = [
-            (0, 0),
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (-1, 1),
-            (1, -1),
-            (1, 1),
-        ]
-        acc = cp.zeros_like(mask, dtype=cp.bool_)
-        for dy, dx in shifts:
-            acc |= cp.roll(cp.roll(mask, dy, axis=0), dx, axis=1)
-        return acc
+def _dilate_mo(mask: cp.ndarray) -> cp.ndarray:
     H, W = mask.shape
     acc = cp.zeros_like(mask, dtype=cp.bool_)
     acc |= mask
@@ -78,23 +62,7 @@ def _dilate_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
     return acc
 
 
-def _erode_mo(mask: cp.ndarray, wrap: bool) -> cp.ndarray:
-    if wrap:
-        shifts = [
-            (0, 0),
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (-1, 1),
-            (1, -1),
-            (1, 1),
-        ]
-        acc = cp.ones_like(mask, dtype=cp.bool_)
-        for dy, dx in shifts:
-            acc &= cp.roll(cp.roll(mask, dy, axis=0), dx, axis=1)
-        return acc
+def _erode_mo(mask: cp.ndarray) -> cp.ndarray:
     H, W = mask.shape
     acc = mask.astype(cp.bool_, copy=True)
     if H > 1:
@@ -144,7 +112,7 @@ def _no_contact_moore(level2_fine: cp.ndarray, level1_fine: cp.ndarray) -> bool:
     l2 = level2_fine.astype(cp.bool_)
     l1 = level1_fine.astype(cp.bool_)
     outside_l1 = ~l1
-    halo_l2 = _dilate_mo(l2, wrap=False)
+    halo_l2 = _dilate_mo(l2)
     return bool((halo_l2 & outside_l1).sum().item() == 0)
 
 
@@ -163,7 +131,7 @@ class AMRGrading3LevelTest(unittest.TestCase):
         L1_base = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
 
         # Expand L1 with a one-cell ring (mid grid), and force coarse parents
-        L1_expanded = _dilate_mo(L1_base, wrap=False)
+        L1_expanded = _dilate_mo(L1_base)
         coarse_force_from_L1ring = L1_expanded.reshape(W, R, W, R).any(axis=(1, 3))
         refine0 = refine0 | coarse_force_from_L1ring
         L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
@@ -171,7 +139,7 @@ class AMRGrading3LevelTest(unittest.TestCase):
         # Gate L2 by eroded L1
         g1 = _grad_mag(u1)
         refine1_mid = _hysteresis_mask(g1, refine_frac, refine_frac * hyst, None)
-        refine1_mid = refine1_mid & _erode_mo(L1_mask, wrap=False)
+        refine1_mid = refine1_mid & _erode_mo(L1_mask)
 
         # Child forces parent (mid->coarse)
         coarse_force = refine1_mid.reshape(W, R, W, R).any(axis=(1, 3))
@@ -202,14 +170,14 @@ class AMRGrading3LevelTest(unittest.TestCase):
         g0 = _grad_mag(u0)
         refine0 = _hysteresis_mask(g0, refine_frac, refine_frac * hyst, None)
         L1_base = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
-        L1_expanded = _dilate_mo(L1_base, wrap=False)
+        L1_expanded = _dilate_mo(L1_base)
         refine0 = refine0 | L1_expanded.reshape(W, R, W, R).any(axis=(1, 3))
         L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
 
         # First L2
         g1 = _grad_mag(u1)
         refine1_mid = _hysteresis_mask(g1, refine_frac, refine_frac * hyst, None)
-        refine1_mid = refine1_mid & _erode_mo(L1_mask, wrap=False)
+        refine1_mid = refine1_mid & _erode_mo(L1_mask)
         refine0 = refine0 | refine1_mid.reshape(W, R, W, R).any(axis=(1, 3))
         L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
 
@@ -219,13 +187,13 @@ class AMRGrading3LevelTest(unittest.TestCase):
         g0b = _grad_mag(u0b)
         refine0b = _hysteresis_mask(g0b, refine_frac, refine_frac * hyst, refine0)
         L1_base_b = _prolong_repeat(refine0b.astype(cp.uint8), R).astype(cp.bool_)
-        L1_ring_b = _dilate_mo(L1_base_b, wrap=False)
+        L1_ring_b = _dilate_mo(L1_base_b)
         refine0b = refine0b | L1_ring_b.reshape(W, R, W, R).any(axis=(1, 3))
         L1_mask_b = _prolong_repeat(refine0b.astype(cp.uint8), R).astype(cp.bool_)
 
         g1b = _grad_mag(u1b)
         refine1_mid_b = _hysteresis_mask(g1b, refine_frac, refine_frac * hyst, refine1_mid)
-        refine1_mid_b = refine1_mid_b & _erode_mo(L1_mask_b, wrap=False)
+        refine1_mid_b = refine1_mid_b & _erode_mo(L1_mask_b)
         refine0b = refine0b | refine1_mid_b.reshape(W, R, W, R).any(axis=(1, 3))
         L1_mask_b = _prolong_repeat(refine0b.astype(cp.uint8), R).astype(cp.bool_)
 
@@ -248,14 +216,14 @@ class AMRGrading3LevelTest(unittest.TestCase):
         g0 = _grad_mag(u0)
         refine0 = _hysteresis_mask(g0, refine_frac, refine_frac * hyst, None)
         L1_base = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
-        L1_ring = _dilate_mo(L1_base, wrap=False)
+        L1_ring = _dilate_mo(L1_base)
         refine0 = refine0 | L1_ring.reshape(W, R, W, R).any(axis=(1, 3))
         L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
 
         # L1 -> L2 gated by eroded L1 and child->parent forcing
         g1 = _grad_mag(u1)
         refine1_mid = _hysteresis_mask(g1, refine_frac, refine_frac * hyst, None)
-        refine1_mid = refine1_mid & _erode_mo(L1_mask, wrap=False)
+        refine1_mid = refine1_mid & _erode_mo(L1_mask)
         refine0 = refine0 | refine1_mid.reshape(W, R, W, R).any(axis=(1, 3))
         L1_mask = _prolong_repeat(refine0.astype(cp.uint8), R).astype(cp.bool_)
 

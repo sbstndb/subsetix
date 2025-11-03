@@ -8,7 +8,9 @@ from subsetix_cupy import (
     evaluate,
     make_input,
     make_union,
+    make_intersection,
     dilate_interval_set,
+    clip_interval_set,
 )
 from subsetix_cupy.expressions import IntervalSet, _require_cupy
 
@@ -320,28 +322,21 @@ def enforce_two_level_grading_set(
             refine_set,
             halo_x=padding,
             halo_y=padding,
-            width=width,
-            height=height,
-            bc="clamp",
         )
     else:
         horiz = dilate_interval_set(
             refine_set,
             halo_x=padding,
             halo_y=0,
-            width=width,
-            height=height,
-            bc="clamp",
         )
         vert = dilate_interval_set(
             refine_set,
             halo_x=0,
             halo_y=padding,
-            width=width,
-            height=height,
-            bc="clamp",
         )
         expanded = evaluate(make_union(make_input(horiz), make_input(vert)))
 
-    union = evaluate(make_union(make_input(refine_set), make_input(expanded)))
-    return union
+    expanded = clip_interval_set(expanded, width=width, height=height)
+    base = clip_interval_set(refine_set, width=width, height=height)
+    union = evaluate(make_union(make_input(base), make_input(expanded)))
+    return clip_interval_set(union, width=width, height=height)

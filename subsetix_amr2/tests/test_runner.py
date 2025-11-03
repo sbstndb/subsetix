@@ -41,7 +41,9 @@ class RunnerTest(unittest.TestCase):
             init_fn,
         )
         coarse, _ = field.as_arrays()
-        self.cp.testing.assert_array_equal(coarse, self.cp.full(coarse.shape, 1.0, dtype=coarse.dtype))
+        expected = self.cp.full(coarse.shape, 1.0, dtype=coarse.dtype)
+        expected[:, 0] = 0.996
+        self.cp.testing.assert_allclose(coarse, expected, atol=1e-7)
 
 
 if __name__ == "__main__":

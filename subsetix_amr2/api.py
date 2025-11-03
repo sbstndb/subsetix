@@ -7,10 +7,17 @@ from typing import Optional
 
 import cupy as cp
 
-from .fields import ActionField, prolong_coarse_to_fine, synchronize_two_level
+from .fields import (
+    ActionField,
+    prolong_coarse_to_fine,
+    synchronize_interval_fields,
+    interval_field_from_dense,
+)
 from .geometry import TwoLevelGeometry
 from .regrid import enforce_two_level_grading_set, gradient_magnitude, gradient_tag_threshold_set
 from subsetix_cupy.expressions import IntervalSet
+from subsetix_cupy.morphology import full_interval_set
+from subsetix_cupy.interval_field import IntervalField
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,8 @@ class TwoLevelMesh:
         self.ratio = int(ratio)
         self.geometry: Optional[TwoLevelGeometry] = None
         self._base_resolution: Optional[int] = None
+        self._coarse_interval: Optional[IntervalSet] = None
+        self.actions: Optional[ActionField] = None
         if coarse_resolution is not None:
             self._base_resolution = int(coarse_resolution)
             if self._base_resolution <= 0:
@@ -52,7 +61,16 @@ class TwoLevelMesh:
             raise RuntimeError("TwoLevelMesh.initialise requires coarse_resolution at construction time")
         rows = self._base_resolution
         width = rows
-        actions = ActionField.full_grid(rows, width, self.ratio)
+        coarse_interval = self._coarse_interval
+        if coarse_interval is None or coarse_interval.row_count != rows:
+            coarse_interval = full_interval_set(width, rows)
+            self._coarse_interval = coarse_interval
+        actions = ActionField.from_interval_set(
+            coarse_interval,
+            width=width,
+            height=rows,
+            ratio=self.ratio,
+        )
         if refine is not None:
             if not isinstance(refine, IntervalSet):
                 raise TypeError("TwoLevelMesh.initialise expects an IntervalSet")
@@ -61,6 +79,8 @@ class TwoLevelMesh:
                 raise ValueError("refine IntervalSet height mismatch with mesh resolution")
             actions.set_from_interval_set(refine)
         self.geometry = TwoLevelGeometry.from_action_field(actions)
+        self._coarse_interval = actions.coarse_interval_set()
+        self.actions = actions
 
     def regrid(self, refine: IntervalSet) -> TwoLevelGeometry:
         if not isinstance(refine, IntervalSet):
@@ -71,7 +91,19 @@ class TwoLevelMesh:
             if rows <= 0:
                 raise ValueError("refine IntervalSet must describe at least one row")
             width = self._base_resolution or rows
-            actions = ActionField.full_grid(rows, width, self.ratio)
+            coarse_interval = self._coarse_interval
+            if (
+                coarse_interval is None
+                or coarse_interval.row_count != rows
+            ):
+                coarse_interval = full_interval_set(width, rows)
+                self._coarse_interval = coarse_interval
+            actions = ActionField.from_interval_set(
+                coarse_interval,
+                width=width,
+                height=rows,
+                ratio=self.ratio,
+            )
             actions.set_from_interval_set(refine)
             self.geometry = TwoLevelGeometry.from_action_field(actions)
             self._base_resolution = width
@@ -79,9 +111,17 @@ class TwoLevelMesh:
             if rows != self.geometry.height:
                 raise ValueError("refine IntervalSet height mismatch with existing geometry")
             width = self.geometry.width
-            actions = ActionField.full_grid(rows, width, self.ratio)
+            coarse_interval = self.geometry.coarse
+            actions = ActionField.from_interval_set(
+                coarse_interval,
+                width=width,
+                height=rows,
+                ratio=self.ratio,
+            )
             actions.set_from_interval_set(refine)
             self.geometry = self.geometry.with_action_field(actions)
+        self._coarse_interval = self.geometry.coarse
+        self.actions = actions
         return self.geometry
 
     def cell_length(self, level: int) -> float:
@@ -103,8 +143,21 @@ class ScalarField:
             raise RuntimeError("mesh.initialise() must run before creating fields")
         shape = (mesh.geometry.height, mesh.geometry.width)
         fine_shape = (shape[0] * mesh.ratio, shape[1] * mesh.ratio)
-        self.coarse = cp.zeros(shape, dtype=dtype)
-        self.fine = cp.zeros(fine_shape, dtype=dtype)
+        self._coarse = cp.zeros(shape, dtype=dtype)
+        self._fine = cp.zeros(fine_shape, dtype=dtype)
+        self.coarse_field = interval_field_from_dense(self._coarse)
+        self.fine_field = interval_field_from_dense(self._fine)
+
+    @property
+    def coarse(self) -> cp.ndarray:
+        return self._coarse
+
+    @property
+    def fine(self) -> cp.ndarray:
+        return self._fine
+
+    def interval_field(self, level: int) -> IntervalField:
+        return self.coarse_field if level == self.mesh.min_level else self.fine_field
 
     def array(self, level: int) -> cp.ndarray:
         return self.coarse if level == self.mesh.min_level else self.fine
@@ -114,14 +167,18 @@ class ScalarField:
             raise RuntimeError("mesh geometry not initialised")
         shape = (self.mesh.geometry.height, self.mesh.geometry.width)
         fine_shape = (shape[0] * self.mesh.ratio, shape[1] * self.mesh.ratio)
-        if self.coarse.shape != shape:
-            self.coarse = cp.zeros(shape, dtype=self.dtype)
-        if self.fine.shape != fine_shape:
-            self.fine = cp.zeros(fine_shape, dtype=self.dtype)
+        if self._coarse.shape != shape:
+            self._coarse = cp.zeros(shape, dtype=self.dtype)
+            self.coarse_field = interval_field_from_dense(self._coarse)
+        if self._fine.shape != fine_shape:
+            self._fine = cp.zeros(fine_shape, dtype=self.dtype)
+            self.fine_field = interval_field_from_dense(self._fine)
 
     def swap(self, other: "ScalarField") -> None:
-        self.coarse, other.coarse = other.coarse, self.coarse
-        self.fine, other.fine = other.fine, self.fine
+        self._coarse, other._coarse = other._coarse, self._coarse
+        self.coarse_field, other.coarse_field = other.coarse_field, self.coarse_field
+        self._fine, other._fine = other._fine, self._fine
+        self.fine_field, other.fine_field = other.fine_field, self.fine_field
 
     def as_arrays(self) -> tuple[cp.ndarray, cp.ndarray]:
         """Return the coarse and fine arrays (no copy)."""
@@ -156,13 +213,17 @@ class MRAdaptor:
         )
         geometry = self.mesh.regrid(graded_set)
         prolong_coarse_to_fine(coarse, self.mesh.ratio, out=self.field.fine, mask=geometry.fine)
-        coarse_sync, fine_sync = synchronize_two_level(
-            self.field.coarse,
-            self.field.fine,
-            graded_set,
+        actions = self.mesh.actions
+        if actions is None:
+            raise RuntimeError("mesh actions not initialised")
+        coarse_field = self.field.coarse_field
+        fine_field = self.field.fine_field
+        synchronize_interval_fields(
+            coarse_field,
+            fine_field,
+            actions,
             ratio=self.mesh.ratio,
             reducer="mean",
             fill_fine_outside=True,
+            copy=False,
         )
-        self.field.coarse = coarse_sync
-        self.field.fine = fine_sync

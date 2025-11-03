@@ -1,5 +1,5 @@
 """
-Micro-benchmark for the upwind advection step.
+Micro-benchmark for the upwind advection step with zero exterior values.
 
 Compares the existing slice-based implementation with a RawKernel that
 computes upwind differences without allocating neighbour arrays. This is
@@ -28,7 +28,7 @@ def _format(values):
 
 _UPWIND_KERNEL_SRC = r"""
 extern "C" __global__
-void upwind_clamp(const float* __restrict__ u,
+void upwind_zero(const float* __restrict__ u,
                   float* __restrict__ out,
                   int width,
                   int height,
@@ -70,7 +70,7 @@ void upwind_clamp(const float* __restrict__ u,
 
 
 def _compile_kernel():
-    return cp.RawKernel(_UPWIND_KERNEL_SRC, "upwind_clamp", options=("--std=c++11",))
+    return cp.RawKernel(_UPWIND_KERNEL_SRC, "upwind_zero", options=("--std=c++11",))
 
 
 def _run_kernel(kernel, field, a, b, dt, dx, dy):
@@ -100,7 +100,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     kernel = _compile_kernel()
 
     for _ in range(3):
-        _step_upwind(coarse, a, b, dt, dx_coarse, dy_coarse, "clamp")
+        _step_upwind(coarse, a, b, dt, dx_coarse, dy_coarse)
         _run_kernel(kernel, coarse, a, b, dt, dx_coarse, dy_coarse)
     cp.cuda.runtime.deviceSynchronize()
 
@@ -117,9 +117,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     ker_times = []
 
     for _ in range(iterations):
-        _, t_ref = time_call(
-            lambda: _step_upwind(coarse, a, b, dt, dx_coarse, dy_coarse, "clamp")
-        )
+        _, t_ref = time_call(lambda: _step_upwind(coarse, a, b, dt, dx_coarse, dy_coarse))
         ref_times.append(t_ref)
         _, t_ker = time_call(
             lambda: _run_kernel(kernel, coarse, a, b, dt, dx_coarse, dy_coarse)
@@ -134,9 +132,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     ker_times.clear()
 
     for _ in range(iterations):
-        _, t_ref = time_call(
-            lambda: _step_upwind(fine, a, b, dt, dx_fine, dy_fine, "clamp")
-        )
+        _, t_ref = time_call(lambda: _step_upwind(fine, a, b, dt, dx_fine, dy_fine))
         ref_times.append(t_ref)
         _, t_ker = time_call(
             lambda: _run_kernel(kernel, fine, a, b, dt, dx_fine, dy_fine)
