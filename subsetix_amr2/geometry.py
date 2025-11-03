@@ -13,6 +13,7 @@ from subsetix_cupy import (
     make_difference,
     make_input,
     make_union,
+    make_intersection,
     prolong_set,
 )
 from subsetix_cupy.expressions import _require_cupy
@@ -20,6 +21,15 @@ from subsetix_cupy.expressions import _require_cupy
 if TYPE_CHECKING:
     from .fields import ActionField
 from subsetix_cupy.plot_utils import intervals_to_mask as _intervals_to_mask_np
+
+
+def _clone_interval_set(interval_set: IntervalSet) -> IntervalSet:
+    cp_mod = _require_cupy()
+    return IntervalSet(
+        begin=cp_mod.array(interval_set.begin, dtype=cp_mod.int32, copy=True),
+        end=cp_mod.array(interval_set.end, dtype=cp_mod.int32, copy=True),
+        row_offsets=cp_mod.array(interval_set.row_offsets, dtype=cp_mod.int32, copy=True),
+    )
 
 
 def mask_to_interval_set(mask: cp.ndarray) -> IntervalSet:
@@ -253,7 +263,25 @@ class TwoLevelGeometry:
                 bc="clamp",
             )
             dilated = evaluate(make_union(make_input(horiz), make_input(vert)), workspace=self.workspace)
-        dilated = evaluate(make_union(make_input(dilated), make_input(self.refine)), workspace=self.workspace)
-        dilated_mask = interval_set_to_mask(dilated, self.width)
-        dilated_mask = cp.minimum(dilated_mask, self.coarse_mask)  # respect coarse coverage
-        return self.with_refine_mask(dilated_mask.astype(cp.bool_, copy=False))
+        dilated = _clone_interval_set(dilated)
+        merged = evaluate(make_union(make_input(dilated), make_input(self.refine)), workspace=self.workspace)
+        merged = _clone_interval_set(merged)
+        clipped_eval = evaluate(
+            make_intersection(make_input(self.coarse), make_input(merged)),
+            workspace=self.workspace,
+        )
+        clipped = _clone_interval_set(clipped_eval)
+        fine_set = prolong_set(clipped, self.ratio)
+        coarse_only_expr = make_difference(make_input(self.coarse), make_input(clipped))
+        coarse_only_set = evaluate(coarse_only_expr, workspace=self.workspace)
+        coarse_only_set = _clone_interval_set(coarse_only_set)
+        return TwoLevelGeometry(
+            ratio=self.ratio,
+            width=self.width,
+            height=self.height,
+            coarse=self.coarse,
+            refine=clipped,
+            fine=fine_set,
+            coarse_only=coarse_only_set,
+            workspace=self.workspace,
+        )

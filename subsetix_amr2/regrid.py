@@ -14,6 +14,78 @@ from subsetix_cupy.expressions import IntervalSet, _require_cupy
 
 from .geometry import interval_set_to_mask, mask_to_interval_set
 
+_COUNT_INTERVALS = cp.RawKernel(
+    r"""
+    extern "C" __global__
+    void subsetix_count_threshold_intervals(const float* __restrict__ data,
+                                            int rows,
+                                            int width,
+                                            float threshold,
+                                            int* __restrict__ counts)
+    {
+        int row = blockIdx.x;
+        if (row >= rows) {
+            return;
+        }
+        const float* row_ptr = data + row * width;
+        bool inside = false;
+        int count = 0;
+        for (int col = 0; col < width; ++col) {
+            float v = row_ptr[col];
+            bool ge = v >= threshold;
+            if (!inside && ge) {
+                inside = true;
+                count += 1;
+            } else if (inside && !ge) {
+                inside = false;
+            }
+        }
+        counts[row] = count;
+    }
+    """,
+    "subsetix_count_threshold_intervals",
+    options=("--std=c++11",),
+)
+
+_WRITE_INTERVALS = cp.RawKernel(
+    r"""
+    extern "C" __global__
+    void subsetix_write_threshold_intervals(const float* __restrict__ data,
+                                             int rows,
+                                             int width,
+                                             float threshold,
+                                             const int* __restrict__ row_offsets,
+                                             int* __restrict__ begin,
+                                             int* __restrict__ end)
+    {
+        int row = blockIdx.x;
+        if (row >= rows) {
+            return;
+        }
+        int offset = row_offsets[row];
+        int local_index = 0;
+        const float* row_ptr = data + row * width;
+        bool inside = false;
+        for (int col = 0; col < width; ++col) {
+            float v = row_ptr[col];
+            bool ge = v >= threshold;
+            if (!inside && ge) {
+                inside = true;
+                begin[offset + local_index] = col;
+            } else if (inside && !ge) {
+                inside = false;
+                end[offset + local_index] = col;
+                local_index += 1;
+            }
+        }
+        if (inside) {
+            end[offset + local_index] = width;
+        }
+    }
+    """,
+    "subsetix_write_threshold_intervals",
+    options=("--std=c++11",),
+)
 
 def _empty_interval_set(rows: int) -> IntervalSet:
     cp_mod = _require_cupy()
@@ -58,8 +130,42 @@ def gradient_tag_set(
     idx = int(positive.size) - count
     part = cp_mod.partition(positive, idx)
     threshold = max(float(part[idx]), float(epsilon))
-    mask = data >= threshold
-    return mask_to_interval_set(mask)
+    width = data.shape[1]
+    counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
+    if rows > 0:
+        _COUNT_INTERVALS(
+            (rows,),
+            (1,),
+            (
+                data,
+                cp_mod.int32(rows),
+                cp_mod.int32(width),
+                cp_mod.float32(threshold),
+                counts,
+            ),
+        )
+    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
+    row_offsets[0] = 0
+    if rows > 0:
+        cp_mod.cumsum(counts, dtype=cp_mod.int32, out=row_offsets[1:])
+    total = int(row_offsets[-1].item()) if rows > 0 else 0
+    begin = cp_mod.empty(total, dtype=cp_mod.int32)
+    end = cp_mod.empty_like(begin)
+    if total > 0:
+        _WRITE_INTERVALS(
+            (rows,),
+            (1,),
+            (
+                data,
+                cp_mod.int32(rows),
+                cp_mod.int32(width),
+                cp_mod.float32(threshold),
+                row_offsets,
+                begin,
+                end,
+            ),
+        )
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
 
 
 def gradient_tag(

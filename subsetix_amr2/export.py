@@ -8,9 +8,9 @@ import numpy as np
 
 from subsetix_cupy.export_vtk import write_rectilinear_grid_vtr, write_unstructured_quads_vtu
 from subsetix_cupy.morphology import ghost_zones
-from subsetix_cupy.expressions import _require_cupy
+from subsetix_cupy.expressions import IntervalSet, _require_cupy
 
-from .geometry import mask_to_interval_set, interval_set_to_mask
+from .geometry import interval_set_to_mask
 
 
 def _ensure_bool(arr: cp.ndarray) -> cp.ndarray:
@@ -44,9 +44,9 @@ def save_two_level_vtk(
     *,
     coarse_field: cp.ndarray,
     fine_field: cp.ndarray,
-    refine_mask: cp.ndarray,
-    coarse_only_mask: cp.ndarray,
-    fine_mask: cp.ndarray,
+    refine_set: IntervalSet,
+    coarse_only_set: IntervalSet,
+    fine_set: IntervalSet,
     dx_coarse: float,
     dy_coarse: float,
     ratio: int = 2,
@@ -60,17 +60,14 @@ def save_two_level_vtk(
     """
 
     cp_mod = _require_cupy()
-    refine_mask = _ensure_bool(refine_mask)
-    coarse_only_mask = _ensure_bool(coarse_only_mask)
-    fine_mask = _ensure_bool(fine_mask)
-
-    height, width = refine_mask.shape
-    fine_height, fine_width = fine_mask.shape
+    height, width = coarse_field.shape
+    fine_height, fine_width = fine_field.shape
     dx_fine = dx_coarse / ratio
     dy_fine = dy_coarse / ratio
 
-    refine_set = mask_to_interval_set(refine_mask)
-    fine_set = mask_to_interval_set(fine_mask)
+    refine_mask = _ensure_bool(interval_set_to_mask(refine_set, width))
+    coarse_only_mask = _ensure_bool(interval_set_to_mask(coarse_only_set, width))
+    fine_mask = _ensure_bool(interval_set_to_mask(fine_set, fine_width))
 
     coarse_ghost_mask = _ghost_mask(
         refine_set,

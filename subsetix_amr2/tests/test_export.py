@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from subsetix_amr2.export import save_two_level_vtk
+from subsetix_amr2.geometry import mask_to_interval_set
 from subsetix_cupy.expressions import _REAL_CUPY
 
 
@@ -20,6 +21,9 @@ class ExportTest(unittest.TestCase):
         ratio = 2
         fine = cp.full((8, 8), 2.0, dtype=cp.float32)
         fine_mask = cp.repeat(cp.repeat(refine_mask, ratio, axis=0), ratio, axis=1)
+        refine_set = mask_to_interval_set(refine_mask)
+        coarse_only_set = mask_to_interval_set(coarse_only)
+        fine_set = mask_to_interval_set(fine_mask)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             files = save_two_level_vtk(
@@ -28,9 +32,9 @@ class ExportTest(unittest.TestCase):
                 5,
                 coarse_field=coarse,
                 fine_field=fine,
-                refine_mask=refine_mask,
-                coarse_only_mask=coarse_only,
-                fine_mask=fine_mask,
+                refine_set=refine_set,
+                coarse_only_set=coarse_only_set,
+                fine_set=fine_set,
                 dx_coarse=0.25,
                 dy_coarse=0.25,
                 ratio=ratio,

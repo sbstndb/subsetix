@@ -28,6 +28,127 @@ _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
 _COPY_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 _FILL_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 
+_ACTION_COUNT_KERNEL = cp.RawKernel(
+    r"""
+    extern "C" __global__
+    void subsetix_count_value_intervals(const signed char* __restrict__ data,
+                                        int rows,
+                                        int width,
+                                        signed char target,
+                                        int* __restrict__ counts)
+    {
+        int row = blockIdx.x;
+        if (row >= rows) {
+            return;
+        }
+        const signed char* row_ptr = data + row * width;
+        bool inside = false;
+        int count = 0;
+        for (int col = 0; col < width; ++col) {
+            signed char v = row_ptr[col];
+            bool match = v == target;
+            if (!inside && match) {
+                inside = true;
+                count += 1;
+            } else if (inside && !match) {
+                inside = false;
+            }
+        }
+        counts[row] = count;
+    }
+    """,
+    "subsetix_count_value_intervals",
+    options=("--std=c++11",),
+)
+
+_ACTION_WRITE_KERNEL = cp.RawKernel(
+    r"""
+    extern "C" __global__
+    void subsetix_write_value_intervals(const signed char* __restrict__ data,
+                                        int rows,
+                                        int width,
+                                        signed char target,
+                                        const int* __restrict__ row_offsets,
+                                        int* __restrict__ begin,
+                                        int* __restrict__ end)
+    {
+        int row = blockIdx.x;
+        if (row >= rows) {
+            return;
+        }
+        const signed char* row_ptr = data + row * width;
+        int offset = row_offsets[row];
+        int local_index = 0;
+        bool inside = false;
+        for (int col = 0; col < width; ++col) {
+            signed char v = row_ptr[col];
+            bool match = v == target;
+            if (!inside && match) {
+                inside = true;
+                begin[offset + local_index] = col;
+            } else if (inside && !match) {
+                inside = false;
+                end[offset + local_index] = col;
+                local_index += 1;
+            }
+        }
+        if (inside) {
+            end[offset + local_index] = width;
+        }
+    }
+    """,
+    "subsetix_write_value_intervals",
+    options=("--std=c++11",),
+)
+
+
+def _intervals_for_value(grid: cp.ndarray, target: int) -> IntervalSet:
+    """
+    Build an IntervalSet describing the cells whose value equals ``target``.
+    """
+
+    cp_mod = _require_cupy()
+    if grid.ndim != 2:
+        raise ValueError("grid must be a 2D array")
+    if grid.dtype != cp_mod.int8:
+        raise TypeError("grid dtype must be int8 for action extraction")
+    rows, width = grid.shape
+    counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
+    if rows > 0:
+        _ACTION_COUNT_KERNEL(
+            (rows,),
+            (1,),
+            (
+                grid,
+                cp_mod.int32(rows),
+                cp_mod.int32(width),
+                cp_mod.int8(target),
+                counts,
+            ),
+        )
+    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
+    row_offsets[0] = 0
+    if rows > 0:
+        cp_mod.cumsum(counts, dtype=cp_mod.int32, out=row_offsets[1:])
+    total = int(row_offsets[-1].item()) if rows > 0 else 0
+    begin = cp_mod.empty(total, dtype=cp_mod.int32)
+    end = cp_mod.empty_like(begin)
+    if total > 0:
+        _ACTION_WRITE_KERNEL(
+            (rows,),
+            (1,),
+            (
+                grid,
+                cp_mod.int32(rows),
+                cp_mod.int32(width),
+                cp_mod.int8(target),
+                row_offsets,
+                begin,
+                end,
+            ),
+        )
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+
 
 def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
     row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
@@ -179,11 +300,8 @@ class ActionField:
     width: int
     height: int
     _dense_cache: cp.ndarray | None = None
-    _refine_mask_cache: cp.ndarray | None = None
     _refine_set_cache: IntervalSet | None = None
     _fine_set_cache: IntervalSet | None = None
-    _fine_mask_cache: cp.ndarray | None = None
-    _dirty: bool = True
 
     @classmethod
     def full_grid(cls, height: int, width: int, ratio: int, *, default: Action = Action.KEEP) -> "ActionField":
@@ -202,20 +320,23 @@ class ActionField:
             self._dense_cache = self.field.values.reshape(self.height, self.width)
         return self._dense_cache
 
+    def _refresh_from_dense(self) -> None:
+        refine = _intervals_for_value(self.dense(), int(Action.REFINE))
+        self._refine_set_cache = refine
+        self._fine_set_cache = None
+
     def set_from_dense(self, actions: cp.ndarray) -> None:
         if actions.shape != (self.height, self.width):
             raise ValueError("actions shape mismatch with ActionField dimensions")
         dense_arr = self.dense()
         cp.copyto(dense_arr, actions.astype(cp.int8, copy=False))
-        self._mark_dirty()
+        self._refresh_from_dense()
 
     def set_from_mask(self, refine_mask: cp.ndarray) -> None:
         if refine_mask.shape != (self.height, self.width):
             raise ValueError("refine_mask shape mismatch with ActionField dimensions")
-        dense = self.dense()
-        dense.fill(int(Action.KEEP))
-        dense[refine_mask] = int(Action.REFINE)
-        self._mark_dirty()
+        refine_set = mask_to_interval_set(refine_mask.astype(cp.bool_, copy=False))
+        self.set_from_interval_set(refine_set)
 
     def set_from_interval_set(self, refine_set: IntervalSet) -> None:
         """Populate the action field directly from an IntervalSet."""
@@ -224,36 +345,24 @@ class ActionField:
         dense.fill(int(Action.KEEP))
         if refine_set.begin.size != 0:
             _fill_intervals(dense, refine_set, int(Action.REFINE))
-        self._mark_dirty()
-
-    def _mark_dirty(self) -> None:
-        self._dirty = True
-        self._refine_mask_cache = None
-        self._refine_set_cache = None
+        self._refine_set_cache = refine_set
         self._fine_set_cache = None
-        self._fine_mask_cache = None
-
-    def refine_mask(self) -> cp.ndarray:
-        if self._refine_mask_cache is None or self._dirty:
-            dense = self.dense()
-            self._refine_mask_cache = cp.equal(dense, int(Action.REFINE))
-            self._dirty = False
-        return self._refine_mask_cache
 
     def refine_set(self) -> IntervalSet:
-        if self._refine_set_cache is None or self._dirty:
-            self._refine_set_cache = mask_to_interval_set(self.refine_mask())
+        if self._refine_set_cache is None:
+            self._refresh_from_dense()
         return self._refine_set_cache
 
+    def refine_mask(self) -> cp.ndarray:
+        return interval_set_to_mask(self.refine_set(), self.width)
+
     def fine_set(self) -> IntervalSet:
-        if self._fine_set_cache is None or self._dirty:
+        if self._fine_set_cache is None:
             self._fine_set_cache = prolong_set(self.refine_set(), int(self.ratio))
         return self._fine_set_cache
 
     def fine_mask(self) -> cp.ndarray:
-        if self._fine_mask_cache is None or self._dirty:
-            self._fine_mask_cache = interval_set_to_mask(self.fine_set(), self.width * int(self.ratio))
-        return self._fine_mask_cache
+        return interval_set_to_mask(self.fine_set(), self.width * int(self.ratio))
 
     def coarse_interval_set(self) -> IntervalSet:
         return self.field.interval_set
