@@ -55,30 +55,26 @@ class TwoLevelMesh:
         self.geometry = TwoLevelGeometry.from_masks(refine_mask, ratio=self.ratio, coarse_mask=coarse_mask)
         self._base_resolution = refine_mask.shape[0]
 
-    def regrid(self, refine) -> TwoLevelGeometry:
-        if isinstance(refine, IntervalSet):
-            rows = int(refine.row_offsets.size - 1)
-            if self.geometry is None:
-                if rows <= 0:
-                    raise ValueError("refine IntervalSet must describe at least one row")
-                width = self._base_resolution or rows
-                actions = ActionField.full_grid(rows, width, self.ratio)
-                actions.set_from_interval_set(refine)
-                self.geometry = TwoLevelGeometry.from_action_field(actions)
-                self._base_resolution = width
-            else:
-                if rows != self.geometry.height:
-                    raise ValueError("refine IntervalSet height mismatch with existing geometry")
-                width = self.geometry.width
-                actions = ActionField.full_grid(rows, width, self.ratio)
-                actions.set_from_interval_set(refine)
-                self.geometry = self.geometry.with_action_field(actions)
+    def regrid(self, refine: IntervalSet) -> TwoLevelGeometry:
+        if not isinstance(refine, IntervalSet):
+            raise TypeError("TwoLevelMesh.regrid expects an IntervalSet")
+
+        rows = int(refine.row_offsets.size - 1)
+        if self.geometry is None:
+            if rows <= 0:
+                raise ValueError("refine IntervalSet must describe at least one row")
+            width = self._base_resolution or rows
+            actions = ActionField.full_grid(rows, width, self.ratio)
+            actions.set_from_interval_set(refine)
+            self.geometry = TwoLevelGeometry.from_action_field(actions)
+            self._base_resolution = width
         else:
-            refine_mask = cp.asarray(refine, dtype=cp.bool_, copy=False)
-            if self.geometry is None:
-                self.initialise(refine_mask)
-            else:
-                self.geometry = self.geometry.with_refine_mask(refine_mask)
+            if rows != self.geometry.height:
+                raise ValueError("refine IntervalSet height mismatch with existing geometry")
+            width = self.geometry.width
+            actions = ActionField.full_grid(rows, width, self.ratio)
+            actions.set_from_interval_set(refine)
+            self.geometry = self.geometry.with_action_field(actions)
         return self.geometry
 
     def cell_length(self, level: int) -> float:
