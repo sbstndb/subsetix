@@ -13,6 +13,7 @@ from subsetix_cupy import (
 from subsetix_cupy.expressions import IntervalSet, _require_cupy
 
 
+
 _COUNT_INTERVALS = cp.RawKernel(
     r"""
     extern "C" __global__
@@ -26,20 +27,33 @@ _COUNT_INTERVALS = cp.RawKernel(
         if (row >= rows) {
             return;
         }
+        const int WARP = 32;
+        int lane = threadIdx.x & (WARP - 1);
         const float* row_ptr = data + row * width;
-        bool inside = false;
+        unsigned int prev = 0u;
         int count = 0;
-        for (int col = 0; col < width; ++col) {
-            float v = row_ptr[col];
-            bool ge = v >= threshold;
-            if (!inside && ge) {
-                inside = true;
-                count += 1;
-            } else if (inside && !ge) {
-                inside = false;
+        for (int base = 0; base < width; base += WARP) {
+            int col = base + lane;
+            bool ge = false;
+            if (col < width) {
+                ge = row_ptr[col] >= threshold;
+            }
+            unsigned int mask = __ballot_sync(0xffffffff, ge);
+            if (lane == 0) {
+                unsigned int prev_mask = (mask << 1) | (prev & 1u);
+                unsigned int starts = mask & ~prev_mask;
+                count += __popc(starts);
+                if (width - base >= WARP) {
+                    prev = (mask >> (WARP - 1)) & 1u;
+                } else {
+                    int last_col = width - base - 1;
+                    prev = (last_col >= 0) ? ((mask >> last_col) & 1u) : 0u;
+                }
             }
         }
-        counts[row] = count;
+        if (lane == 0) {
+            counts[row] = count;
+        }
     }
     """,
     "subsetix_count_threshold_intervals",
@@ -50,35 +64,55 @@ _WRITE_INTERVALS = cp.RawKernel(
     r"""
     extern "C" __global__
     void subsetix_write_threshold_intervals(const float* __restrict__ data,
-                                             int rows,
-                                             int width,
-                                             float threshold,
-                                             const int* __restrict__ row_offsets,
-                                             int* __restrict__ begin,
-                                             int* __restrict__ end)
+                                            int rows,
+                                            int width,
+                                            float threshold,
+                                            const int* __restrict__ row_offsets,
+                                            int* __restrict__ begin,
+                                            int* __restrict__ end)
     {
         int row = blockIdx.x;
         if (row >= rows) {
             return;
         }
-        int offset = row_offsets[row];
-        int local_index = 0;
+        const int WARP = 32;
+        int lane = threadIdx.x & (WARP - 1);
         const float* row_ptr = data + row * width;
-        bool inside = false;
-        for (int col = 0; col < width; ++col) {
-            float v = row_ptr[col];
-            bool ge = v >= threshold;
-            if (!inside && ge) {
-                inside = true;
-                begin[offset + local_index] = col;
-            } else if (inside && !ge) {
-                inside = false;
-                end[offset + local_index] = col;
-                local_index += 1;
+        int base_offset = row_offsets[row];
+        int begin_idx = 0;
+        int end_idx = 0;
+        unsigned int prev = 0u;
+        for (int base = 0; base < width; base += WARP) {
+            int col = base + lane;
+            bool ge = false;
+            if (col < width) {
+                ge = row_ptr[col] >= threshold;
+            }
+            unsigned int mask = __ballot_sync(0xffffffff, ge);
+            if (lane == 0) {
+                unsigned int prev_mask = (mask << 1) | (prev & 1u);
+                unsigned int starts = mask & ~prev_mask;
+                unsigned int stops = prev_mask & ~mask;
+                while (starts) {
+                    unsigned int bit = __ffs(starts) - 1u;
+                    begin[base_offset + begin_idx++] = base + bit;
+                    starts &= (starts - 1u);
+                }
+                while (stops) {
+                    unsigned int bit = __ffs(stops) - 1u;
+                    end[base_offset + end_idx++] = base + bit;
+                    stops &= (stops - 1u);
+                }
+                if (width - base >= WARP) {
+                    prev = (mask >> (WARP - 1)) & 1u;
+                } else {
+                    int last_col = width - base - 1;
+                    prev = (last_col >= 0) ? ((mask >> last_col) & 1u) : 0u;
+                }
             }
         }
-        if (inside) {
-            end[offset + local_index] = width;
+        if (lane == 0 && prev) {
+            end[base_offset + end_idx++] = width;
         }
     }
     """,
@@ -107,7 +141,7 @@ def _intervals_above_threshold(
     counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
     _COUNT_INTERVALS(
         (rows,),
-        (1,),
+        (32,),
         (
             data,
             cp_mod.int32(rows),
@@ -125,7 +159,7 @@ def _intervals_above_threshold(
     if total > 0:
         _WRITE_INTERVALS(
             (rows,),
-            (1,),
+            (32,),
             (
                 data,
                 cp_mod.int32(rows),
