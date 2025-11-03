@@ -8,7 +8,7 @@ import cupy as cp
 
 from subsetix_cupy.interval_field import IntervalField, create_interval_field
 from subsetix_cupy.expressions import IntervalSet, _require_cupy
-from .geometry import mask_to_interval_set, interval_set_to_mask
+from .geometry import mask_to_interval_set
 from subsetix_cupy import prolong_set
 
 _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
@@ -295,7 +295,6 @@ class ActionField:
     ratio: int
     width: int
     height: int
-    _dense_cache: cp.ndarray | None = None
     _refine_set_cache: IntervalSet | None = None
     _fine_set_cache: IntervalSet | None = None
 
@@ -311,54 +310,33 @@ class ActionField:
         interval_field = create_interval_field(coarse_set, fill_value=int(default), dtype=cp_mod.int8)
         return cls(field=interval_field, ratio=int(ratio), width=width, height=height)
 
-    def dense(self) -> cp.ndarray:
-        if self._dense_cache is None or self._dense_cache.shape != (self.height, self.width):
-            self._dense_cache = self.field.values.reshape(self.height, self.width)
-        return self._dense_cache
+    def _grid_view(self) -> cp.ndarray:
+        return self.field.values.reshape(self.height, self.width)
 
-    def _refresh_from_dense(self) -> None:
-        refine = _intervals_for_value(self.dense(), int(Action.REFINE))
+    def _refresh_from_values(self) -> None:
+        refine = _intervals_for_value(self._grid_view(), int(Action.REFINE))
         self._refine_set_cache = refine
         self._fine_set_cache = None
-
-    def set_from_dense(self, actions: cp.ndarray) -> None:
-        if actions.shape != (self.height, self.width):
-            raise ValueError("actions shape mismatch with ActionField dimensions")
-        dense_arr = self.dense()
-        cp.copyto(dense_arr, actions.astype(cp.int8, copy=False))
-        self._refresh_from_dense()
-
-    def set_from_mask(self, refine_mask: cp.ndarray) -> None:
-        if refine_mask.shape != (self.height, self.width):
-            raise ValueError("refine_mask shape mismatch with ActionField dimensions")
-        refine_set = mask_to_interval_set(refine_mask.astype(cp.bool_, copy=False))
-        self.set_from_interval_set(refine_set)
 
     def set_from_interval_set(self, refine_set: IntervalSet) -> None:
         """Populate the action field directly from an IntervalSet."""
 
-        dense = self.dense()
-        dense.fill(int(Action.KEEP))
+        grid = self._grid_view()
+        grid[...] = int(Action.KEEP)
         if refine_set.begin.size != 0:
-            _fill_intervals(dense, refine_set, int(Action.REFINE))
+            _fill_intervals(grid, refine_set, int(Action.REFINE))
         self._refine_set_cache = refine_set
         self._fine_set_cache = None
 
     def refine_set(self) -> IntervalSet:
         if self._refine_set_cache is None:
-            self._refresh_from_dense()
+            self._refresh_from_values()
         return self._refine_set_cache
-
-    def refine_mask(self) -> cp.ndarray:
-        return interval_set_to_mask(self.refine_set(), self.width)
 
     def fine_set(self) -> IntervalSet:
         if self._fine_set_cache is None:
             self._fine_set_cache = prolong_set(self.refine_set(), int(self.ratio))
         return self._fine_set_cache
-
-    def fine_mask(self) -> cp.ndarray:
-        return interval_set_to_mask(self.fine_set(), self.width * int(self.ratio))
 
     def coarse_interval_set(self) -> IntervalSet:
         return self.field.interval_set
@@ -372,7 +350,7 @@ def prolong_coarse_to_fine(
     ratio: int,
     *,
     out: Optional[cp.ndarray] = None,
-    mask: Optional[cp.ndarray] = None,
+    mask: Optional[object] = None,
 ) -> cp.ndarray:
     """
     Repeat a coarse field onto the fine grid (nearest-neighbour prolongation).
@@ -396,11 +374,15 @@ def prolong_coarse_to_fine(
         raise ValueError("out must match the fine grid shape")
     if mask is None:
         cp.copyto(out, upsampled)
+    elif isinstance(mask, IntervalSet):
+        if out is None:
+            raise ValueError("out array required when using IntervalSet mask")
+        _copy_intervals_into(out, upsampled, mask)
     else:
-        mask = mask.astype(cp.bool_, copy=False)
-        if mask.shape != upsampled.shape:
+        mask_arr = cp.asarray(mask, dtype=cp.bool_, copy=False)
+        if mask_arr.shape != upsampled.shape:
             raise ValueError("mask must match fine grid shape")
-        cp.copyto(out, upsampled, where=mask)
+        cp.copyto(out, upsampled, where=mask_arr)
     return out
 
 
@@ -448,12 +430,19 @@ def synchronize_two_level(
     2. Optionally refill fine values outside the refine region from the coarse grid.
     """
 
-    if not isinstance(refine_mask, ActionField):
+    if isinstance(refine_mask, IntervalSet):
+        rows = refine_mask.row_offsets.size - 1
+        if rows != coarse.shape[0]:
+            raise ValueError("refine IntervalSet height must match coarse grid")
+        action_field = ActionField.full_grid(coarse.shape[0], coarse.shape[1], ratio)
+        action_field.set_from_interval_set(refine_mask)
+    elif not isinstance(refine_mask, ActionField):
         mask_array = cp.asarray(refine_mask, dtype=cp.bool_)
         if mask_array.shape != coarse.shape:
             raise ValueError("refine_mask must have same shape as coarse grid")
+        refine_set = mask_to_interval_set(mask_array)
         action_field = ActionField.full_grid(coarse.shape[0], coarse.shape[1], ratio)
-        action_field.set_from_mask(mask_array)
+        action_field.set_from_interval_set(refine_set)
     else:
         action_field = refine_mask
 

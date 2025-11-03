@@ -7,9 +7,10 @@ from typing import Optional
 
 import cupy as cp
 
-from .fields import prolong_coarse_to_fine, synchronize_two_level
+from .fields import ActionField, prolong_coarse_to_fine, synchronize_two_level
 from .geometry import TwoLevelGeometry
-from .regrid import enforce_two_level_grading, gradient_magnitude, gradient_tag_threshold
+from .regrid import enforce_two_level_grading_set, gradient_magnitude, gradient_tag_threshold_set
+from subsetix_cupy.expressions import IntervalSet
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,12 @@ class TwoLevelMesh:
         self.max_level = max_level
         self.ratio = int(ratio)
         self.geometry: Optional[TwoLevelGeometry] = None
+        self._base_resolution: Optional[int] = None
         if coarse_resolution is not None:
             res = int(coarse_resolution)
             if res <= 0:
                 raise ValueError("coarse_resolution must be positive")
+            self._base_resolution = res
             refine_mask = cp.zeros((res, res), dtype=cp.bool_)
             self.initialise(refine_mask)
 
@@ -50,12 +53,32 @@ class TwoLevelMesh:
         refine_mask = refine_mask.astype(cp.bool_, copy=False)
         coarse_mask = cp.ones_like(refine_mask, dtype=cp.bool_)
         self.geometry = TwoLevelGeometry.from_masks(refine_mask, ratio=self.ratio, coarse_mask=coarse_mask)
+        self._base_resolution = refine_mask.shape[0]
 
-    def regrid(self, refine_mask: cp.ndarray) -> TwoLevelGeometry:
-        if self.geometry is None:
-            self.initialise(refine_mask)
+    def regrid(self, refine) -> TwoLevelGeometry:
+        if isinstance(refine, IntervalSet):
+            rows = int(refine.row_offsets.size - 1)
+            if self.geometry is None:
+                if rows <= 0:
+                    raise ValueError("refine IntervalSet must describe at least one row")
+                width = self._base_resolution or rows
+                actions = ActionField.full_grid(rows, width, self.ratio)
+                actions.set_from_interval_set(refine)
+                self.geometry = TwoLevelGeometry.from_action_field(actions)
+                self._base_resolution = width
+            else:
+                if rows != self.geometry.height:
+                    raise ValueError("refine IntervalSet height mismatch with existing geometry")
+                width = self.geometry.width
+                actions = ActionField.full_grid(rows, width, self.ratio)
+                actions.set_from_interval_set(refine)
+                self.geometry = self.geometry.with_action_field(actions)
         else:
-            self.geometry = self.geometry.with_refine_mask(refine_mask.astype(cp.bool_, copy=False))
+            refine_mask = cp.asarray(refine, dtype=cp.bool_, copy=False)
+            if self.geometry is None:
+                self.initialise(refine_mask)
+            else:
+                self.geometry = self.geometry.with_refine_mask(refine_mask)
         return self.geometry
 
     def cell_length(self, level: int) -> float:
@@ -118,15 +141,22 @@ class MRAdaptor:
         self.mode = mode
 
     def __call__(self) -> None:
-        grad = gradient_magnitude(self.field.coarse)
-        tags = gradient_tag_threshold(grad, self.refine_threshold)
-        graded = enforce_two_level_grading(tags, padding=self.grading, mode=self.mode)
-        geometry = self.mesh.regrid(graded)
-        prolong_coarse_to_fine(self.field.coarse, self.mesh.ratio, out=self.field.fine, mask=geometry.fine_mask)
+        coarse = self.field.coarse
+        grad = gradient_magnitude(coarse)
+        tags_set = gradient_tag_threshold_set(grad, self.refine_threshold)
+        graded_set = enforce_two_level_grading_set(
+            tags_set,
+            padding=self.grading,
+            mode=self.mode,
+            width=coarse.shape[1],
+            height=coarse.shape[0],
+        )
+        geometry = self.mesh.regrid(graded_set)
+        prolong_coarse_to_fine(coarse, self.mesh.ratio, out=self.field.fine, mask=geometry.fine)
         coarse_sync, fine_sync = synchronize_two_level(
             self.field.coarse,
             self.field.fine,
-            graded,
+            graded_set,
             ratio=self.mesh.ratio,
             reducer="mean",
             fill_fine_outside=True,

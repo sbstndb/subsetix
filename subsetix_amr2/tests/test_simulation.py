@@ -1,13 +1,13 @@
 import unittest
 
-import cupy as cp
-
 from subsetix_amr2.simulation import (
     AMR2Simulation,
     SimulationConfig,
     SimulationStats,
     create_square_field,
 )
+from subsetix_amr2.geometry import interval_set_to_mask
+import cupy as cp
 
 
 class SimulationTest(unittest.TestCase):
@@ -29,7 +29,8 @@ class SimulationTest(unittest.TestCase):
         assert state is not None
         self.assertEqual(state.coarse.shape, (16, 16))
         self.assertEqual(state.fine.shape, (32, 32))
-        refine_mask = state.actions.refine_mask()
+        refine_set = state.actions.refine_set()
+        refine_mask = interval_set_to_mask(refine_set, state.actions.width)
         self.assertEqual(refine_mask.shape, (16, 16))
         self.assertEqual(refine_mask.dtype, cp.bool_)
         self.assertEqual(state.geometry.ratio, config.ratio)

@@ -12,7 +12,6 @@ from subsetix_cupy import (
 )
 from subsetix_cupy.expressions import IntervalSet, _require_cupy
 
-from .geometry import interval_set_to_mask, mask_to_interval_set
 
 _COUNT_INTERVALS = cp.RawKernel(
     r"""
@@ -198,30 +197,6 @@ def gradient_tag_threshold_set(
     return _intervals_above_threshold(data, thresh)
 
 
-def gradient_tag(
-    values: cp.ndarray,
-    frac_high: float,
-    *,
-    epsilon: float = 1e-8,
-) -> cp.ndarray:
-    """Wrapper returning a dense mask for backwards compatibility."""
-
-    interval = gradient_tag_set(values, frac_high, epsilon=epsilon)
-    return interval_set_to_mask(interval, values.shape[1])
-
-
-def gradient_tag_threshold(
-    values: cp.ndarray,
-    threshold: float,
-    *,
-    epsilon: float = 1e-8,
-) -> cp.ndarray:
-    """Dense-mask wrapper for ``gradient_tag_threshold_set``."""
-
-    interval = gradient_tag_threshold_set(values, threshold, epsilon=epsilon)
-    return interval_set_to_mask(interval, values.shape[1])
-
-
 def enforce_two_level_grading_set(
     refine_set: IntervalSet,
     *,
@@ -268,26 +243,3 @@ def enforce_two_level_grading_set(
 
     union = evaluate(make_union(make_input(refine_set), make_input(expanded)))
     return union
-
-
-def enforce_two_level_grading(
-    refine_mask: cp.ndarray,
-    *,
-    padding: int = 1,
-    mode: str = "von_neumann",
-) -> cp.ndarray:
-    """
-    Ensure a refined cell carries its immediate parents by dilating the mask.
-    """
-
-    cp_mod = _require_cupy()
-    interval = mask_to_interval_set(refine_mask)
-    graded = enforce_two_level_grading_set(
-        interval,
-        padding=padding,
-        mode=mode,
-        width=refine_mask.shape[1],
-        height=refine_mask.shape[0],
-    )
-    mask = interval_set_to_mask(graded, refine_mask.shape[1])
-    return cp_mod.asarray(mask, dtype=cp_mod.bool_)

@@ -39,3 +39,7 @@ __pycache__/
 ## OS files
 .DS_Store
 Thumbs.db
+
+## Demo artifacts
+out_vtk/
+.pytest_cache/

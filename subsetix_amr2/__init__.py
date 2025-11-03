@@ -9,11 +9,8 @@ set operations implemented in :mod:`subsetix_cupy`.
 from .geometry import TwoLevelGeometry, mask_to_interval_set, interval_set_to_mask
 from .regrid import (
     gradient_magnitude,
-    gradient_tag,
-    gradient_tag_threshold,
     gradient_tag_threshold_set,
     gradient_tag_set,
-    enforce_two_level_grading,
     enforce_two_level_grading_set,
 )
 from .fields import (
@@ -47,11 +44,8 @@ __all__ = [
     "mask_to_interval_set",
     "interval_set_to_mask",
     "gradient_magnitude",
-    "gradient_tag",
-    "gradient_tag_threshold",
     "gradient_tag_set",
     "gradient_tag_threshold_set",
-    "enforce_two_level_grading",
     "enforce_two_level_grading_set",
     "prolong_coarse_to_fine",
     "restrict_fine_to_coarse",

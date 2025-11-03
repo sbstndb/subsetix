@@ -135,7 +135,7 @@ def update_ghost(field: ScalarField) -> None:
     coarse, fine = synchronize_two_level(
         field.coarse,
         field.fine,
-        geometry.refine_mask,
+        geometry.refine,
         ratio=field.mesh.ratio,
         reducer="mean",
         fill_fine_outside=True,
