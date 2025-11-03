@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
@@ -189,9 +189,38 @@ def _append_cell(points: List[Tuple[float, float, float]],
     types.append(9)  # VTK_QUAD
 
 
+def _interval_field_cells(field) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from subsetix_cupy.interval_field import IntervalField
+
+    if not isinstance(field, IntervalField):
+        raise TypeError("field must be an IntervalField")
+
+    begin = _to_numpy(field.interval_set.begin).astype(np.int32, copy=False)
+    end = _to_numpy(field.interval_set.end).astype(np.int32, copy=False)
+    rows = _to_numpy(field.interval_set.interval_rows()).astype(np.int32, copy=False)
+    offsets = _to_numpy(field.interval_cell_offsets).astype(np.int32, copy=False)
+    values = _to_numpy(field.values).astype(np.float32, copy=False)
+
+    counts = end - begin
+    total = int(counts.sum()) if counts.size else 0
+    if total == 0:
+        return (
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.float32),
+        )
+
+    row_rep = np.repeat(rows, counts)
+    cols_segments = [np.arange(b, e, dtype=np.int32) for b, e in zip(begin, end)]
+    cols = np.concatenate(cols_segments) if cols_segments else np.zeros(0, dtype=np.int32)
+    value_segments = [values[offsets[i]: offsets[i + 1]] for i in range(len(offsets) - 1)]
+    vals = np.concatenate(value_segments) if value_segments else np.zeros(0, dtype=np.float32)
+    return row_rep, cols, vals
+
+
 def write_unstructured_quads_vtu(
     path: str,
-    cells: List[Tuple[np.ndarray, np.ndarray, int, float, float, float, float]],
+    cells: List[Tuple[Any, ...]],
     origin=(0.0, 0.0),
 ) -> None:
     """Write a single UnstructuredGrid (.vtu) where each selected cell across levels becomes a quad.
@@ -208,6 +237,22 @@ def write_unstructured_quads_vtu(
     ghosts: List[int] = []
 
     for entry in cells:
+        if not entry:
+            continue
+        first = entry[0]
+        if hasattr(first, "interval_set"):
+            if len(entry) < 7:
+                raise ValueError("IntervalField entries must be (field, level, dx, dy, x0, y0, ghost_flag)")
+            field, lvl, dx, dy, x0, y0, ghost_flag = entry[:7]
+            rows_arr, cols_arr, vals_arr = _interval_field_cells(field)
+            ghost_val = int(ghost_flag)
+            for row, col, val in zip(rows_arr, cols_arr, vals_arr, strict=True):
+                _append_cell(points, connectivity, offsets, types, x0, y0, dx, dy, int(row), int(col))
+                levels.append(int(lvl))
+                values.append(float(val))
+                ghosts.append(ghost_val)
+            continue
+
         if len(entry) == 7:
             mask, u, lvl, dx, dy, x0, y0 = entry
             ghost = None

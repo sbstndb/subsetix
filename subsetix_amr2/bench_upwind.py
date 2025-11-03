@@ -17,7 +17,8 @@ from statistics import mean, stdev
 
 import cupy as cp
 
-from subsetix_amr2.simulation import _step_upwind
+from subsetix_amr2.fields import interval_field_from_dense
+from subsetix_cupy.interval_stencil import step_upwind_interval
 
 
 def _format(values):
@@ -88,6 +89,10 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
 
     coarse = cp.random.random((size, size), dtype=cp.float32)
     fine = cp.random.random((size * ratio, size * ratio), dtype=cp.float32)
+    coarse_field = interval_field_from_dense(coarse)
+    fine_field = interval_field_from_dense(fine)
+    coarse_out = cp.empty_like(coarse_field.values)
+    fine_out = cp.empty_like(fine_field.values)
 
     a = 1.0
     b = 1.0
@@ -100,8 +105,31 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     kernel = _compile_kernel()
 
     for _ in range(3):
-        _step_upwind(coarse, a, b, dt, dx_coarse, dy_coarse)
+        step_upwind_interval(
+            coarse_field,
+            width=size,
+            height=size,
+            a=a,
+            b=b,
+            dt=dt,
+            dx=dx_coarse,
+            dy=dy_coarse,
+            out=coarse_out,
+        )
         _run_kernel(kernel, coarse, a, b, dt, dx_coarse, dy_coarse)
+    for _ in range(3):
+        step_upwind_interval(
+            fine_field,
+            width=size * ratio,
+            height=size * ratio,
+            a=a,
+            b=b,
+            dt=dt,
+            dx=dx_fine,
+            dy=dy_fine,
+            out=fine_out,
+        )
+        _run_kernel(kernel, fine, a, b, dt, dx_fine, dy_fine)
     cp.cuda.runtime.deviceSynchronize()
 
     def time_call(fn):
@@ -116,8 +144,24 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     ref_times = []
     ker_times = []
 
+    def interval_step(field, out_buf, width, height, dx, dy):
+        step_upwind_interval(
+            field,
+            width=width,
+            height=height,
+            a=a,
+            b=b,
+            dt=dt,
+            dx=dx,
+            dy=dy,
+            out=out_buf,
+        )
+        return out_buf
+
     for _ in range(iterations):
-        _, t_ref = time_call(lambda: _step_upwind(coarse, a, b, dt, dx_coarse, dy_coarse))
+        _, t_ref = time_call(
+            lambda: interval_step(coarse_field, coarse_out, size, size, dx_coarse, dy_coarse)
+        )
         ref_times.append(t_ref)
         _, t_ker = time_call(
             lambda: _run_kernel(kernel, coarse, a, b, dt, dx_coarse, dy_coarse)
@@ -132,7 +176,16 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     ker_times.clear()
 
     for _ in range(iterations):
-        _, t_ref = time_call(lambda: _step_upwind(fine, a, b, dt, dx_fine, dy_fine))
+        _, t_ref = time_call(
+            lambda: interval_step(
+                fine_field,
+                fine_out,
+                size * ratio,
+                size * ratio,
+                dx_fine,
+                dy_fine,
+            )
+        )
         ref_times.append(t_ref)
         _, t_ker = time_call(
             lambda: _run_kernel(kernel, fine, a, b, dt, dx_fine, dy_fine)

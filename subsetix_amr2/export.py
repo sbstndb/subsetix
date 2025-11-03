@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import os
-from typing import Dict
+from typing import Dict, Tuple
 
-import cupy as cp
-import numpy as np
-
-from subsetix_cupy.export_vtk import write_rectilinear_grid_vtr, write_unstructured_quads_vtu
-from subsetix_cupy.morphology import dilate_interval_set, clip_interval_set
+from subsetix_cupy.export_vtk import write_unstructured_quads_vtu
 from subsetix_cupy.expressions import (
     IntervalSet,
     _require_cupy,
@@ -16,30 +12,31 @@ from subsetix_cupy.expressions import (
     make_input,
     make_intersection,
 )
+from subsetix_cupy.interval_field import IntervalField
+from subsetix_cupy.morphology import ghost_zones
 
-from .geometry import interval_set_to_mask
+from .fields import gather_interval_subset, interval_field_from_dense
 
 
-def _ensure_bool(arr: cp.ndarray) -> cp.ndarray:
+def _as_interval_field(field, *, name: str) -> IntervalField:
     cp_mod = _require_cupy()
-    if not isinstance(arr, cp_mod.ndarray):
-        raise TypeError("expected CuPy array")
-    return arr.astype(cp_mod.bool_, copy=False)
+    if isinstance(field, IntervalField):
+        return field
+    if not isinstance(field, cp_mod.ndarray):
+        raise TypeError(f"{name} must be an IntervalField or CuPy array")
+    if field.ndim != 2:
+        raise ValueError(f"{name} must be a 2D array")
+    return interval_field_from_dense(field)
 
 
-def _ghost_mask(interval_set, width: int, height: int, halo_x: int, halo_y: int) -> cp.ndarray:
+def _interval_dimensions(field: IntervalField) -> Tuple[int, int]:
     cp_mod = _require_cupy()
-    if halo_x <= 0 and halo_y <= 0:
-        return cp_mod.zeros((height, width), dtype=cp_mod.bool_)
-    dilated = dilate_interval_set(
-        interval_set,
-        halo_x=max(0, halo_x),
-        halo_y=max(0, halo_y),
-    )
-    clipped = clip_interval_set(dilated, width=width, height=height)
-    base = clip_interval_set(interval_set, width=width, height=height)
-    ghost = evaluate(make_difference(make_input(clipped), make_input(base)))
-    return interval_set_to_mask(ghost, width).astype(cp_mod.bool_, copy=False)
+    height = int(field.interval_set.row_count)
+    if field.interval_set.begin.size == 0:
+        width = 0
+    else:
+        width = int(cp_mod.max(field.interval_set.end).item())
+    return height, width
 
 
 def save_two_level_vtk(
@@ -47,8 +44,8 @@ def save_two_level_vtk(
     base: str,
     step: int,
     *,
-    coarse_field: cp.ndarray,
-    fine_field: cp.ndarray,
+    coarse_field,
+    fine_field,
     refine_set: IntervalSet,
     coarse_only_set: IntervalSet,
     fine_set: IntervalSet,
@@ -57,88 +54,61 @@ def save_two_level_vtk(
     ratio: int = 2,
     time_value: float = 0.0,
     ghost_halo: int = 1,
+    width: int | None = None,
+    height: int | None = None,
 ) -> Dict[str, str]:
     """
-    Save VTK files (two rectilinear grids + combined unstructured mesh) for a two-level AMR snapshot.
+    Save an unstructured VTK file describing a two-level AMR snapshot.
     Returns a dict with generated filenames.
     """
 
-    cp_mod = _require_cupy()
-    height, width = coarse_field.shape
-    fine_height, fine_width = fine_field.shape
+    coarse_interval = _as_interval_field(coarse_field, name="coarse_field")
+    fine_interval = _as_interval_field(fine_field, name="fine_field")
+
+    default_height, default_width = _interval_dimensions(coarse_interval)
+    width = int(width if width is not None else default_width)
+    height = int(height if height is not None else default_height)
+
+    fine_width = width * ratio
+    fine_height = height * ratio
     dx_fine = dx_coarse / ratio
     dy_fine = dy_coarse / ratio
 
-    refine_mask = _ensure_bool(interval_set_to_mask(refine_set, width))
-    coarse_only_mask = _ensure_bool(interval_set_to_mask(coarse_only_set, width))
-    fine_mask = _ensure_bool(interval_set_to_mask(fine_set, fine_width))
+    # Coarse active region excludes ghost halo around refine set.
+    coarse_ghost_raw = ghost_zones(refine_set, halo_x=ghost_halo, halo_y=ghost_halo, width=width, height=height)
+    coarse_ghost_expr = make_intersection(make_input(coarse_ghost_raw), make_input(coarse_only_set))
+    coarse_ghost_set = evaluate(coarse_ghost_expr)
+    coarse_active_expr = make_difference(make_input(coarse_only_set), make_input(coarse_ghost_set))
+    coarse_active_set = evaluate(coarse_active_expr)
 
-    coarse_ghost_mask = _ghost_mask(
-        refine_set,
-        width=width,
-        height=height,
-        halo_x=ghost_halo,
-        halo_y=ghost_halo,
-    )
-    fine_ghost_mask = _ghost_mask(
+    # Fine active + ghost halos.
+    fine_ghost_set = ghost_zones(
         fine_set,
-        width=fine_width,
-        height=fine_height,
         halo_x=max(0, ghost_halo * ratio),
         halo_y=max(0, ghost_halo * ratio),
+        width=fine_width,
+        height=fine_height,
     )
+
+    coarse_active_field = gather_interval_subset(coarse_interval, coarse_active_set)
+    coarse_ghost_field = gather_interval_subset(coarse_interval, coarse_ghost_set)
+    fine_active_field = gather_interval_subset(fine_interval, fine_set)
+    fine_ghost_field = gather_interval_subset(fine_interval, fine_ghost_set)
+
+    cells = []
+    if coarse_active_field.interval_set.begin.size != 0:
+        cells.append((coarse_active_field, 0, dx_coarse, dy_coarse, 0.0, 0.0, 0))
+    if coarse_ghost_field.interval_set.begin.size != 0:
+        cells.append((coarse_ghost_field, 0, dx_coarse, dy_coarse, 0.0, 0.0, 1))
+    if fine_active_field.interval_set.begin.size != 0:
+        cells.append((fine_active_field, 1, dx_fine, dy_fine, 0.0, 0.0, 0))
+    if fine_ghost_field.interval_set.begin.size != 0:
+        cells.append((fine_ghost_field, 1, dx_fine, dy_fine, 0.0, 0.0, 1))
 
     os.makedirs(out_dir, exist_ok=True)
-    coarse_path = os.path.join(out_dir, f"{base}_L0_step{step:04d}.vtr")
-    fine_path = os.path.join(out_dir, f"{base}_L1_step{step:04d}.vtr")
     mesh_path = os.path.join(out_dir, f"{base}_mesh_step{step:04d}.vtu")
-
-    coarse_arrays = {
-        "refine_mask": refine_mask,
-        "coarse_only": coarse_only_mask,
-    }
-    if ghost_halo > 0:
-        coarse_arrays["ghost"] = coarse_ghost_mask
-
-    fine_arrays = {
-        "fine_active": fine_mask,
-    }
-    if ghost_halo > 0:
-        fine_arrays["ghost"] = fine_ghost_mask
-
-    write_rectilinear_grid_vtr(
-        coarse_path,
-        coarse_field,
-        dx_coarse,
-        dy_coarse,
-        cell_arrays=coarse_arrays,
-    )
-
-    write_rectilinear_grid_vtr(
-        fine_path,
-        fine_field,
-        dx_fine,
-        dy_fine,
-        cell_arrays=fine_arrays,
-    )
-
-    coarse_active_mesh = cp_mod.logical_and(coarse_only_mask, ~coarse_ghost_mask)
-    coarse_ghost_mesh = cp_mod.logical_and(coarse_ghost_mask, ~coarse_active_mesh)
-    fine_active_mesh = fine_mask
-    fine_ghost_mesh = fine_ghost_mask
-
-    write_unstructured_quads_vtu(
-        mesh_path,
-        cells=[
-            (coarse_active_mesh, coarse_field, 0, dx_coarse, dy_coarse, 0.0, 0.0),
-            (coarse_ghost_mesh, coarse_field, 0, dx_coarse, dy_coarse, 0.0, 0.0, coarse_ghost_mesh),
-            (fine_active_mesh, fine_field, 1, dx_fine, dy_fine, 0.0, 0.0),
-            (fine_ghost_mesh, fine_field, 1, dx_fine, dy_fine, 0.0, 0.0, fine_ghost_mesh),
-        ],
-    )
+    write_unstructured_quads_vtu(mesh_path, cells=cells)
 
     return {
-        "coarse_vtr": os.path.basename(coarse_path),
-        "fine_vtr": os.path.basename(fine_path),
         "mesh_vtu": os.path.basename(mesh_path),
     }

@@ -11,12 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-import cupy as cp
-
 from .api import Box, MRAdaptor, ScalarField, TwoLevelMesh, make_scalar_field
 from .export import save_two_level_vtk
 from .fields import synchronize_interval_fields
-from .simulation import _step_upwind
+from subsetix_cupy.interval_stencil import step_upwind_interval_field
 
 
 @dataclass(frozen=True)
@@ -156,8 +154,8 @@ def save_snapshot(
         os.fspath(output.directory),
         output.prefix,
         step,
-        coarse_field=field.coarse,
-        fine_field=field.fine,
+        coarse_field=field.coarse_field,
+        fine_field=field.fine_field,
         refine_set=geometry.refine,
         coarse_only_set=geometry.coarse_only,
         fine_set=geometry.fine,
@@ -166,6 +164,8 @@ def save_snapshot(
         ratio=mesh.ratio,
         time_value=time_value,
         ghost_halo=output.ghost_halo,
+        width=geometry.width,
+        height=geometry.height,
     )
 
 
@@ -214,8 +214,31 @@ def run_two_level_simulation(
         update_ghost(field)
 
         unp1.resize()
-        unp1.coarse[...] = _step_upwind(field.coarse, a, b, dt_step, dx0, dy0)
-        unp1.fine[...] = _step_upwind(field.fine, a, b, dt_step, dx1, dy1)
+        geometry = mesh.geometry
+        if geometry is None:
+            raise RuntimeError("mesh geometry not initialised")
+        ratio = mesh.ratio
+        coarse_next = step_upwind_interval_field(
+            field.coarse_field,
+            width=geometry.width,
+            height=geometry.height,
+            a=a,
+            b=b,
+            dt=dt_step,
+            dx=dx0,
+            dy=dy0,
+        )
+        fine_next = step_upwind_interval_field(
+            field.fine_field,
+            width=geometry.width * ratio,
+            height=geometry.height * ratio,
+            a=a,
+            b=b,
+            dt=dt_step,
+            dx=dx1,
+            dy=dy1,
+        )
+        unp1.set_interval_fields(coarse=coarse_next, fine=fine_next)
         field.swap(unp1)
 
         t = min(args.tf, t + dt_step)

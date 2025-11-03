@@ -63,10 +63,11 @@ class ExportTest(unittest.TestCase):
                 dy_coarse=0.25,
                 ratio=ratio,
                 ghost_halo=1,
+                width=geom.width,
+                height=geom.height,
             )
 
-            expected_keys = {"coarse_vtr", "fine_vtr", "mesh_vtu"}
-            self.assertTrue(expected_keys.issubset(files.keys()))
+            self.assertEqual(set(files.keys()), {"mesh_vtu"})
             for fname in files.values():
                 path = os.path.join(tmpdir, fname)
                 self.assertTrue(os.path.exists(path), f"missing {path}")
