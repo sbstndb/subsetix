@@ -16,6 +16,8 @@ from subsetix_cupy.expressions import (
     make_input,
 )
 from subsetix_cupy import prolong_set
+from subsetix_cupy.multilevel import prolong_field, restrict_field
+from subsetix_cupy.morphology import full_interval_set
 
 _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
     "raw T coarse, int32 coarse_w, int32 ratio",
@@ -33,6 +35,7 @@ _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
 
 _COPY_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 _FILL_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
+_SUBSET_KERNEL_CACHE: Dict[tuple[str, str], cp.RawKernel] = {}
 
 _ACTION_COUNT_KERNEL = cp.RawKernel(
     r"""
@@ -276,6 +279,290 @@ def _fill_intervals(array: cp.ndarray, interval_set: IntervalSet, value) -> None
     kernel(grid, (block,), (row_ids, interval_set.begin, interval_set.end, array.dtype.type(value), array, width))
 
 
+def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
+    cp_mod = _require_cupy()
+    dtype_obj = cp_mod.dtype(dtype)
+    if dtype_obj != cp_mod.float32:
+        raise TypeError("interval subset kernels currently support float32 values only")
+    key = (mode, dtype_obj.str)
+    kernel = _SUBSET_KERNEL_CACHE.get(key)
+    if kernel is not None:
+        return kernel
+    if mode not in {"gather", "scatter"}:
+        raise ValueError("mode must be 'gather' or 'scatter'")
+
+    if mode == "gather":
+        func_name = "subsetix_interval_subset_gather"
+        code = r"""
+        extern "C" __global__
+        void subsetix_interval_subset_gather(const int* __restrict__ subset_rows,
+                                             const int* __restrict__ subset_begin,
+                                             const int* __restrict__ subset_end,
+                                             const int* __restrict__ subset_cell_offsets,
+                                             const int* __restrict__ super_row_offsets,
+                                             const int* __restrict__ super_begin,
+                                             const int* __restrict__ super_end,
+                                             const int* __restrict__ super_cell_offsets,
+                                             const float* __restrict__ super_values,
+                                             float* __restrict__ subset_values,
+                                             int super_row_count)
+        {
+            int interval = blockIdx.x;
+            int row = subset_rows[interval];
+            if (row < 0 || row >= super_row_count) {
+                return;
+            }
+            int start = subset_begin[interval];
+            int stop = subset_end[interval];
+            if (stop <= start) {
+                return;
+            }
+            int dst_base = subset_cell_offsets[interval];
+            int dst_offset = 0;
+
+            int row_start = super_row_offsets[row];
+            int row_stop = super_row_offsets[row + 1];
+            if (row_start >= row_stop) {
+                return;
+            }
+            int lo = row_start;
+            int hi = row_stop - 1;
+            int idx = row_start;
+            while (lo <= hi) {
+                int mid = (lo + hi) >> 1;
+                int b = super_begin[mid];
+                int e = super_end[mid];
+                if (start < b) {
+                    hi = mid - 1;
+                } else if (start >= e) {
+                    lo = mid + 1;
+                } else {
+                    idx = mid;
+                    break;
+                }
+            }
+            if (lo > hi) {
+                idx = lo;
+            }
+            if (idx < row_start) {
+                idx = row_start;
+            }
+
+            int current = start;
+            while (current < stop && idx < row_stop) {
+                int b = super_begin[idx];
+                int e = super_end[idx];
+                if (current < b) {
+                    current = b;
+                    continue;
+                }
+                int copy_end = stop < e ? stop : e;
+                int length = copy_end - current;
+                if (length > 0) {
+                    int src_base = super_cell_offsets[idx] + (current - b);
+                    for (int t = threadIdx.x; t < length; t += blockDim.x) {
+                        subset_values[dst_base + dst_offset + t] = super_values[src_base + t];
+                    }
+                    dst_offset += length;
+                    current = copy_end;
+                }
+                if (current >= e) {
+                    idx += 1;
+                }
+                if (length == 0 && current < stop) {
+                    // advance to avoid infinite loops when current == e
+                    current = current + 1;
+                }
+            }
+        }
+        """
+    else:
+        func_name = "subsetix_interval_subset_scatter"
+        code = r"""
+        extern "C" __global__
+        void subsetix_interval_subset_scatter(const int* __restrict__ subset_rows,
+                                              const int* __restrict__ subset_begin,
+                                              const int* __restrict__ subset_end,
+                                              const int* __restrict__ subset_cell_offsets,
+                                              const int* __restrict__ super_row_offsets,
+                                              const int* __restrict__ super_begin,
+                                              const int* __restrict__ super_end,
+                                              const int* __restrict__ super_cell_offsets,
+                                              const float* __restrict__ subset_values,
+                                              float* __restrict__ super_values,
+                                              int super_row_count)
+        {
+            int interval = blockIdx.x;
+            int row = subset_rows[interval];
+            if (row < 0 || row >= super_row_count) {
+                return;
+            }
+            int start = subset_begin[interval];
+            int stop = subset_end[interval];
+            if (stop <= start) {
+                return;
+            }
+            int src_base = subset_cell_offsets[interval];
+            int src_offset = 0;
+
+            int row_start = super_row_offsets[row];
+            int row_stop = super_row_offsets[row + 1];
+            if (row_start >= row_stop) {
+                return;
+            }
+            int lo = row_start;
+            int hi = row_stop - 1;
+            int idx = row_start;
+            while (lo <= hi) {
+                int mid = (lo + hi) >> 1;
+                int b = super_begin[mid];
+                int e = super_end[mid];
+                if (start < b) {
+                    hi = mid - 1;
+                } else if (start >= e) {
+                    lo = mid + 1;
+                } else {
+                    idx = mid;
+                    break;
+                }
+            }
+            if (lo > hi) {
+                idx = lo;
+            }
+            if (idx < row_start) {
+                idx = row_start;
+            }
+
+            int current = start;
+            while (current < stop && idx < row_stop) {
+                int b = super_begin[idx];
+                int e = super_end[idx];
+                if (current < b) {
+                    current = b;
+                    continue;
+                }
+                int copy_end = stop < e ? stop : e;
+                int length = copy_end - current;
+                if (length > 0) {
+                    int dst_base = super_cell_offsets[idx] + (current - b);
+                    for (int t = threadIdx.x; t < length; t += blockDim.x) {
+                        super_values[dst_base + t] = subset_values[src_base + src_offset + t];
+                    }
+                    src_offset += length;
+                    current = copy_end;
+                }
+                if (current >= e) {
+                    idx += 1;
+                }
+                if (length == 0 && current < stop) {
+                    current = current + 1;
+                }
+            }
+        }
+        """
+
+    kernel = cp_mod.RawKernel(code, func_name, options=("--std=c++11",))
+    _SUBSET_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
+def _gather_subset_into(field: IntervalField, subset_field: IntervalField) -> None:
+    cp_mod = _require_cupy()
+    interval_count = int(subset_field.interval_set.begin.size)
+    if interval_count == 0:
+        return
+    kernel = _get_interval_subset_kernel("gather", subset_field.values.dtype)
+    block = 128
+    grid = (interval_count,)
+    subset_rows = subset_field.interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    subset_begin = subset_field.interval_set.begin.astype(cp_mod.int32, copy=False)
+    subset_end = subset_field.interval_set.end.astype(cp_mod.int32, copy=False)
+    subset_offsets = subset_field.interval_cell_offsets.astype(cp_mod.int32, copy=False)
+    super_row_offsets = field.interval_set.row_offsets.astype(cp_mod.int32, copy=False)
+    super_begin = field.interval_set.begin.astype(cp_mod.int32, copy=False)
+    super_end = field.interval_set.end.astype(cp_mod.int32, copy=False)
+    super_offsets = field.interval_cell_offsets.astype(cp_mod.int32, copy=False)
+    kernel(
+        grid,
+        (block,),
+        (
+            subset_rows,
+            subset_begin,
+            subset_end,
+            subset_offsets,
+            super_row_offsets,
+            super_begin,
+            super_end,
+            super_offsets,
+            field.values.astype(cp_mod.float32, copy=False),
+            subset_field.values.astype(cp_mod.float32, copy=False),
+            np.int32(field.interval_set.row_count),
+        ),
+    )
+
+
+def _scatter_subset_from(subset_field: IntervalField, field: IntervalField) -> None:
+    cp_mod = _require_cupy()
+    interval_count = int(subset_field.interval_set.begin.size)
+    if interval_count == 0:
+        return
+    kernel = _get_interval_subset_kernel("scatter", subset_field.values.dtype)
+    block = 128
+    grid = (interval_count,)
+    subset_rows = subset_field.interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    subset_begin = subset_field.interval_set.begin.astype(cp_mod.int32, copy=False)
+    subset_end = subset_field.interval_set.end.astype(cp_mod.int32, copy=False)
+    subset_offsets = subset_field.interval_cell_offsets.astype(cp_mod.int32, copy=False)
+    super_row_offsets = field.interval_set.row_offsets.astype(cp_mod.int32, copy=False)
+    super_begin = field.interval_set.begin.astype(cp_mod.int32, copy=False)
+    super_end = field.interval_set.end.astype(cp_mod.int32, copy=False)
+    super_offsets = field.interval_cell_offsets.astype(cp_mod.int32, copy=False)
+    kernel(
+        grid,
+        (block,),
+        (
+            subset_rows,
+            subset_begin,
+            subset_end,
+            subset_offsets,
+            super_row_offsets,
+            super_begin,
+            super_end,
+            super_offsets,
+            subset_field.values.astype(cp_mod.float32, copy=False),
+            field.values.astype(cp_mod.float32, copy=False),
+            np.int32(field.interval_set.row_count),
+        ),
+    )
+
+
+def gather_interval_subset(field: IntervalField, subset: IntervalSet) -> IntervalField:
+    """
+    Extract a subset of ``field`` described by ``subset`` into a new IntervalField.
+    """
+
+    subset_field = create_interval_field(subset, fill_value=0.0, dtype=field.values.dtype)
+    _gather_subset_into(field, subset_field)
+    return subset_field
+
+
+def scatter_interval_subset(field: IntervalField, subset_field: IntervalField) -> None:
+    """
+    Scatter values from ``subset_field`` back into ``field`` at matching coordinates.
+    """
+
+    _scatter_subset_from(subset_field, field)
+
+
+def clone_interval_field(field: IntervalField) -> IntervalField:
+    cp_mod = _require_cupy()
+    return IntervalField(
+        interval_set=field.interval_set,
+        values=cp_mod.array(field.values, copy=True),
+        interval_cell_offsets=field.interval_cell_offsets,
+    )
+
+
 _PROLONG_BLOCK_KERNEL: cp.RawKernel | None = None
 _RESTRICT_BLOCK_KERNEL: cp.RawKernel | None = None
 
@@ -469,6 +756,18 @@ class Action(IntEnum):
     REFINE = 1
 
 
+_FULL_ACTION_INTERVAL_CACHE: Dict[tuple[int, int], IntervalSet] = {}
+
+
+def _full_action_interval_set(width: int, height: int) -> IntervalSet:
+    key = (height, width)
+    cached = _FULL_ACTION_INTERVAL_CACHE.get(key)
+    if cached is None:
+        cached = full_interval_set(width, height)
+        _FULL_ACTION_INTERVAL_CACHE[key] = cached
+    return cached
+
+
 @dataclass
 class ActionField:
     """
@@ -488,16 +787,48 @@ class ActionField:
     _coarse_only_cache: IntervalSet | None = None
 
     @classmethod
-    def full_grid(cls, height: int, width: int, ratio: int, *, default: Action = Action.KEEP) -> "ActionField":
+    def from_interval_set(
+        cls,
+        interval_set: IntervalSet,
+        *,
+        width: int,
+        height: int,
+        ratio: int,
+        default: Action = Action.KEEP,
+    ) -> "ActionField":
         cp_mod = _require_cupy()
-        if height <= 0 or width <= 0:
+        width_int = int(width)
+        height_int = int(height)
+        if height_int <= 0 or width_int <= 0:
+            raise ValueError("width and height must be positive")
+        if interval_set.row_count != height_int:
+            raise ValueError("interval_set row count must match height")
+        row_ids = interval_set.rows_index()
+        if row_ids.size != height_int:
+            raise ValueError("interval_set rows must cover the dense range [0, height)")
+        expected_rows = cp_mod.arange(height_int, dtype=cp_mod.int32)
+        if row_ids.size and not bool(cp_mod.all(row_ids == expected_rows)):
+            raise ValueError("interval_set rows must be the dense range [0, height)")
+        interval_field = create_interval_field(interval_set, fill_value=int(default), dtype=cp_mod.int8)
+        expected_cells = width_int * height_int
+        if int(interval_field.values.size) != expected_cells:
+            raise ValueError("interval_set must cover exactly width * height cells")
+        return cls(field=interval_field, ratio=int(ratio), width=width_int, height=height_int)
+
+    @classmethod
+    def full_grid(cls, height: int, width: int, ratio: int, *, default: Action = Action.KEEP) -> "ActionField":
+        height_int = int(height)
+        width_int = int(width)
+        if height_int <= 0 or width_int <= 0:
             raise ValueError("height and width must be positive")
-        begin = cp_mod.zeros(height, dtype=cp_mod.int32)
-        end = cp_mod.full(height, width, dtype=cp_mod.int32)
-        row_offsets = cp_mod.arange(height + 1, dtype=cp_mod.int32)
-        coarse_set = IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
-        interval_field = create_interval_field(coarse_set, fill_value=int(default), dtype=cp_mod.int8)
-        return cls(field=interval_field, ratio=int(ratio), width=width, height=height)
+        interval_set = _full_action_interval_set(width_int, height_int)
+        return cls.from_interval_set(
+            interval_set,
+            width=width_int,
+            height=height_int,
+            ratio=ratio,
+            default=default,
+        )
 
     def _grid_view(self) -> cp.ndarray:
         return self.field.values.reshape(self.height, self.width)
@@ -635,10 +966,18 @@ def synchronize_two_level(
     """
 
     if isinstance(refine_mask, IntervalSet):
+        coarse_height, coarse_width = coarse.shape
         rows = refine_mask.row_offsets.size - 1
-        if rows != coarse.shape[0]:
+        if rows != coarse_height:
             raise ValueError("refine IntervalSet height must match coarse grid")
-        action_field = ActionField.full_grid(coarse.shape[0], coarse.shape[1], ratio)
+        full_coarse = _full_action_interval_set(coarse_width, coarse_height)
+        action_field = ActionField.from_interval_set(
+            full_coarse,
+            width=coarse_width,
+            height=coarse_height,
+            ratio=ratio,
+            default=Action.KEEP,
+        )
         action_field.set_from_interval_set(refine_mask)
     elif isinstance(refine_mask, ActionField):
         action_field = refine_mask
@@ -667,4 +1006,45 @@ def synchronize_two_level(
     fine_target = cp.array(fine, copy=True) if copy else fine
     coarse_only = action_field.coarse_only_set()
     _prolong_blocks_from_coarse(coarse_target, fine_target, coarse_only, ratio)
+    return coarse_target, fine_target
+
+
+def synchronize_interval_fields(
+    coarse: IntervalField,
+    fine: IntervalField,
+    actions: ActionField,
+    *,
+    ratio: int,
+    reducer: str = "mean",
+    fill_fine_outside: bool = True,
+    copy: bool = True,
+) -> tuple[IntervalField, IntervalField]:
+    """Synchronise interval-backed coarse/fine fields based on AMR actions."""
+
+    if not isinstance(actions, ActionField):
+        raise TypeError("actions must be an ActionField")
+    if int(actions.ratio) != int(ratio):
+        raise ValueError("ratio argument must match ActionField ratio")
+
+    cp_mod = _require_cupy()
+    if coarse.values.dtype != cp_mod.float32 or fine.values.dtype != cp_mod.float32:
+        raise TypeError("coarse and fine interval fields must use float32 values")
+
+    coarse_target = clone_interval_field(coarse) if copy else coarse
+    fine_target = clone_interval_field(fine) if copy else fine
+
+    restricted = restrict_field(fine, ratio, reducer=reducer)
+    refine_set = actions.refine_set()
+    if refine_set.begin.size != 0:
+        restricted_subset = gather_interval_subset(restricted, refine_set)
+        scatter_interval_subset(coarse_target, restricted_subset)
+
+    if fill_fine_outside:
+        coarse_only = actions.coarse_only_set()
+        if coarse_only.begin.size != 0:
+            coarse_subset = gather_interval_subset(coarse_target, coarse_only)
+            fine_subset = prolong_field(coarse_subset, ratio)
+            if fine_subset.values.size != 0:
+                scatter_interval_subset(fine_target, fine_subset)
+
     return coarse_target, fine_target

@@ -17,6 +17,7 @@ from .fields import (
     prolong_coarse_to_fine,
     restrict_fine_to_coarse,
     synchronize_two_level,
+    synchronize_interval_fields,
 )
 from .export import save_two_level_vtk
 from .api import Box, MRAdaptor, TwoLevelMesh, make_scalar_field
@@ -50,6 +51,7 @@ __all__ = [
     "prolong_coarse_to_fine",
     "restrict_fine_to_coarse",
     "synchronize_two_level",
+    "synchronize_interval_fields",
     "save_two_level_vtk",
     "Box",
     "TwoLevelMesh",
