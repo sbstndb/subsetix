@@ -1,10 +1,7 @@
 import unittest
 
-from subsetix_amr2.fields import (
-    prolong_coarse_to_fine,
-    restrict_fine_to_coarse,
-    synchronize_two_level,
-)
+from subsetix_amr2.fields import prolong_coarse_to_fine, restrict_fine_to_coarse, synchronize_two_level
+from subsetix_amr2.geometry import mask_to_interval_set
 from subsetix_cupy.expressions import _REAL_CUPY
 
 
@@ -25,7 +22,7 @@ class FieldsTest(unittest.TestCase):
         mask = self.cp.zeros((4, 4), dtype=self.cp.bool_)
         mask[::2, ::2] = True
         out = self.cp.full((4, 4), -1.0, dtype=self.cp.float32)
-        prolong_coarse_to_fine(coarse, 2, out=out, mask=mask)
+        prolong_coarse_to_fine(coarse, 2, out=out, mask=mask_to_interval_set(mask))
         expected = self.cp.full((4, 4), -1.0, dtype=self.cp.float32)
         expected[0, 0] = 0.0
         expected[0, 2] = 1.0
@@ -46,7 +43,7 @@ class FieldsTest(unittest.TestCase):
         refine = self.cp.zeros_like(coarse, dtype=self.cp.bool_)
         refine[1:3, 1:3] = True
         coarse_updated, fine_updated = synchronize_two_level(
-            coarse, fine, refine, ratio=2, reducer="mean", fill_fine_outside=True
+            coarse, fine, mask_to_interval_set(refine), ratio=2, reducer="mean", fill_fine_outside=True
         )
 
         # Coarse cells inside refine area should have mean value 2.
@@ -67,7 +64,7 @@ class FieldsTest(unittest.TestCase):
         coarse_updated, fine_updated = synchronize_two_level(
             coarse,
             fine,
-            refine,
+            mask_to_interval_set(refine),
             ratio=2,
             reducer="mean",
             fill_fine_outside=False,
@@ -80,4 +77,4 @@ class FieldsTest(unittest.TestCase):
         fine = self.cp.zeros((8, 8), dtype=self.cp.float32)
         refine = self.cp.zeros((2, 2), dtype=self.cp.bool_)
         with self.assertRaises(ValueError):
-            synchronize_two_level(coarse, fine, refine, ratio=2)
+            synchronize_two_level(coarse, fine, mask_to_interval_set(refine), ratio=2)

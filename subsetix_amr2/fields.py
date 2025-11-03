@@ -8,7 +8,6 @@ import cupy as cp
 
 from subsetix_cupy.interval_field import IntervalField, create_interval_field
 from subsetix_cupy.expressions import IntervalSet, _require_cupy
-from .geometry import mask_to_interval_set
 from subsetix_cupy import prolong_set
 
 _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
@@ -350,7 +349,7 @@ def prolong_coarse_to_fine(
     ratio: int,
     *,
     out: Optional[cp.ndarray] = None,
-    mask: Optional[object] = None,
+    mask: Optional[IntervalSet] = None,
 ) -> cp.ndarray:
     """
     Repeat a coarse field onto the fine grid (nearest-neighbour prolongation).
@@ -379,10 +378,7 @@ def prolong_coarse_to_fine(
             raise ValueError("out array required when using IntervalSet mask")
         _copy_intervals_into(out, upsampled, mask)
     else:
-        mask_arr = cp.asarray(mask, dtype=cp.bool_, copy=False)
-        if mask_arr.shape != upsampled.shape:
-            raise ValueError("mask must match fine grid shape")
-        cp.copyto(out, upsampled, where=mask_arr)
+        raise TypeError("mask must be an IntervalSet or None")
     return out
 
 
@@ -436,15 +432,10 @@ def synchronize_two_level(
             raise ValueError("refine IntervalSet height must match coarse grid")
         action_field = ActionField.full_grid(coarse.shape[0], coarse.shape[1], ratio)
         action_field.set_from_interval_set(refine_mask)
-    elif not isinstance(refine_mask, ActionField):
-        mask_array = cp.asarray(refine_mask, dtype=cp.bool_)
-        if mask_array.shape != coarse.shape:
-            raise ValueError("refine_mask must have same shape as coarse grid")
-        refine_set = mask_to_interval_set(mask_array)
-        action_field = ActionField.full_grid(coarse.shape[0], coarse.shape[1], ratio)
-        action_field.set_from_interval_set(refine_set)
-    else:
+    elif isinstance(refine_mask, ActionField):
         action_field = refine_mask
+    else:
+        raise TypeError("refine_mask must be an IntervalSet or ActionField")
 
     if action_field.height != coarse.shape[0] or action_field.width != coarse.shape[1]:
         raise ValueError("ActionField dimensions must match coarse grid shape")

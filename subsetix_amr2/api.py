@@ -42,18 +42,25 @@ class TwoLevelMesh:
         self.geometry: Optional[TwoLevelGeometry] = None
         self._base_resolution: Optional[int] = None
         if coarse_resolution is not None:
-            res = int(coarse_resolution)
-            if res <= 0:
+            self._base_resolution = int(coarse_resolution)
+            if self._base_resolution <= 0:
                 raise ValueError("coarse_resolution must be positive")
-            self._base_resolution = res
-            refine_mask = cp.zeros((res, res), dtype=cp.bool_)
-            self.initialise(refine_mask)
+            self.initialise()
 
-    def initialise(self, refine_mask: cp.ndarray) -> None:
-        refine_mask = refine_mask.astype(cp.bool_, copy=False)
-        coarse_mask = cp.ones_like(refine_mask, dtype=cp.bool_)
-        self.geometry = TwoLevelGeometry.from_masks(refine_mask, ratio=self.ratio, coarse_mask=coarse_mask)
-        self._base_resolution = refine_mask.shape[0]
+    def initialise(self, refine: IntervalSet | None = None) -> None:
+        if self._base_resolution is None:
+            raise RuntimeError("TwoLevelMesh.initialise requires coarse_resolution at construction time")
+        rows = self._base_resolution
+        width = rows
+        actions = ActionField.full_grid(rows, width, self.ratio)
+        if refine is not None:
+            if not isinstance(refine, IntervalSet):
+                raise TypeError("TwoLevelMesh.initialise expects an IntervalSet")
+            refine_rows = refine.row_offsets.size - 1
+            if refine_rows != rows:
+                raise ValueError("refine IntervalSet height mismatch with mesh resolution")
+            actions.set_from_interval_set(refine)
+        self.geometry = TwoLevelGeometry.from_action_field(actions)
 
     def regrid(self, refine: IntervalSet) -> TwoLevelGeometry:
         if not isinstance(refine, IntervalSet):

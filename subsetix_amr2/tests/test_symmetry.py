@@ -3,6 +3,7 @@ import unittest
 from subsetix_amr2.runner import SimulationArgs, run_two_level_simulation
 from subsetix_amr2.simulation import SquareSpec, create_square_field
 from subsetix_amr2.fields import prolong_coarse_to_fine
+from subsetix_amr2.geometry import interval_set_to_mask
 from subsetix_cupy.expressions import _REAL_CUPY
 
 
@@ -35,9 +36,11 @@ class SymmetryTest(unittest.TestCase):
         field = run_two_level_simulation(args, init_fn)
 
         coarse, fine = field.as_arrays()
-        refine_mask = field.mesh.geometry.refine_mask
-        coarse_only = field.mesh.geometry.coarse_only_mask
-        fine_mask = field.mesh.geometry.fine_mask
+        geom = field.mesh.geometry
+        assert geom is not None
+        refine_mask = interval_set_to_mask(geom.refine, geom.width)
+        coarse_only = interval_set_to_mask(geom.coarse_only, geom.width)
+        fine_mask = interval_set_to_mask(geom.fine, geom.width * geom.ratio)
 
         def _max_diff(arr):
             return float(self.cp.max(self.cp.abs(arr - arr.T)).item())
