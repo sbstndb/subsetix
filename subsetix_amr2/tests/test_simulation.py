@@ -20,7 +20,7 @@ class SimulationTest(unittest.TestCase):
             coarse_resolution=16,
             velocity=(0.1, 0.0),
             cfl=0.8,
-            refine_fraction=0.2,
+            refine_threshold=0.05,
         )
         sim = AMR2Simulation(config)
         sim.initialize_square()
@@ -39,7 +39,7 @@ class SimulationTest(unittest.TestCase):
             coarse_resolution=16,
             velocity=(0.1, 0.0),
             cfl=0.8,
-            refine_fraction=0.2,
+            refine_threshold=0.05,
         )
         sim = AMR2Simulation(config)
         sim.initialize_square()

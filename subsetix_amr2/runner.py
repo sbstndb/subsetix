@@ -44,7 +44,7 @@ class SimulationArgs:
     tf: float = 0.1
     min_level: int = 4
     max_level: int = 5
-    refine_fraction: float = 0.1
+    refine_threshold: float = 0.05
     grading: int = 1
     grading_mode: str = "von_neumann"
     output: OutputOptions | None = None
@@ -61,7 +61,7 @@ def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
     parser.add_argument("--Tf", dest="tf", type=float, default=0.1, help="Final time")
     parser.add_argument("--min-level", type=int, default=4)
     parser.add_argument("--max-level", type=int, default=5)
-    parser.add_argument("--refine-frac", type=float, default=0.1)
+    parser.add_argument("--refine-threshold", type=float, default=0.05)
     parser.add_argument("--grading", type=int, default=1)
     parser.add_argument(
         "--grading-mode",
@@ -98,7 +98,7 @@ def parse_simulation_args(argv: Sequence[str] | None = None) -> SimulationArgs:
         tf=float(ns.tf),
         min_level=int(ns.min_level),
         max_level=int(ns.max_level),
-        refine_fraction=float(ns.refine_frac),
+        refine_threshold=float(ns.refine_threshold),
         grading=int(ns.grading),
         grading_mode=ns.grading_mode,
         output=output,
@@ -113,6 +113,8 @@ def _validate_args(args: SimulationArgs) -> None:
         raise ValueError("two-level driver expects max_level = min_level + 1")
     if args.tf < args.t0:
         raise ValueError("tf must be >= t0")
+    if args.refine_threshold <= 0.0:
+        raise ValueError("refine_threshold must be > 0")
 
 
 def build_mesh(args: SimulationArgs, ratio: int = 2) -> TwoLevelMesh:
@@ -199,7 +201,7 @@ def run_two_level_simulation(
 
     adaptor = MRAdaptor(
         field,
-        refine_fraction=args.refine_fraction,
+        refine_threshold=args.refine_threshold,
         grading=args.grading,
         mode=args.grading_mode,
     )

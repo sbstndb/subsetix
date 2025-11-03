@@ -22,7 +22,7 @@ class TwoLevelAPITest(unittest.TestCase):
         self.assertEqual(field.fine.shape, (16, 16))
 
         field.coarse[...] = self.cp.linspace(0.0, 1.0, 64, dtype=self.cp.float32).reshape(8, 8)
-        adaptor = MRAdaptor(field, refine_fraction=0.25, grading=1)
+        adaptor = MRAdaptor(field, refine_threshold=0.05, grading=1)
         adaptor()
 
         self.assertIsNotNone(mesh.geometry)

@@ -6,6 +6,8 @@ from subsetix_amr2.regrid import (
     enforce_two_level_grading_set,
     gradient_magnitude,
     gradient_tag,
+    gradient_tag_threshold,
+    gradient_tag_threshold_set,
     gradient_tag_set,
 )
 from subsetix_cupy.expressions import _REAL_CUPY
@@ -39,6 +41,18 @@ class RegridTest(unittest.TestCase):
         data = self.cp.zeros((4, 4), dtype=self.cp.float32)
         mask = gradient_tag(data, frac_high=0.2)
         self.assertFalse(mask.any())
+
+    def test_gradient_tag_threshold(self) -> None:
+        data = self.cp.zeros((4, 4), dtype=self.cp.float32)
+        data[1, 1] = 0.5
+        data[2, 2] = 1.0
+        mask = gradient_tag_threshold(data, threshold=0.75)
+        self.assertTrue(mask[2, 2])
+        self.assertFalse(mask[1, 1])
+
+        tagged_set = gradient_tag_threshold_set(data, threshold=0.75)
+        mask_from_set = interval_set_to_mask(tagged_set, data.shape[1])
+        self.cp.testing.assert_array_equal(mask_from_set, mask)
 
     def test_gradient_tag_custom_epsilon(self) -> None:
         data = self.cp.full((4, 4), 1e-9, dtype=self.cp.float32)

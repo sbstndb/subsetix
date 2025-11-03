@@ -21,7 +21,7 @@ class SymmetryTest(unittest.TestCase):
             tf=0.02,
             min_level=3,
             max_level=4,
-            refine_fraction=0.2,
+            refine_threshold=0.05,
             grading=1,
         )
 

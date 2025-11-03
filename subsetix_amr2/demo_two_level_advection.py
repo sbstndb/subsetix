@@ -4,7 +4,7 @@ Two-level AMR advection demo built on top of subsetix_amr2.
 Usage example:
 
     python -m subsetix_amr2.demo_two_level_advection \\
-        --coarse 96 --steps 200 --refine-frac 0.10
+        --coarse 96 --steps 200 --refine-threshold 0.05
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def run_demo(args: argparse.Namespace):
         coarse_resolution=W,
         velocity=(a, b),
         cfl=float(args.cfl),
-        refine_fraction=float(args.refine_frac),
+        refine_threshold=float(args.refine_threshold),
         grading=int(args.grading),
         grading_mode=args.grading_mode,
         bc=args.bc,
@@ -94,7 +94,12 @@ def create_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Two-level AMR advection demo using subsetix_amr2")
     ap.add_argument("--coarse", type=int, default=96, help="Coarse grid resolution (square domain)")
     ap.add_argument("--steps", type=int, default=300, help="Number of time steps")
-    ap.add_argument("--refine-frac", type=float, default=0.10, help="Fraction of cells tagged by the gradient percentile")
+    ap.add_argument(
+        "--refine-threshold",
+        type=float,
+        default=0.05,
+        help="Absolute gradient threshold for tagging (≥ threshold triggers refinement)",
+    )
     ap.add_argument("--grading", type=int, default=1, help="Number of coarse cells used for grading dilation")
     ap.add_argument(
         "--grading-mode",

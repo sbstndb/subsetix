@@ -20,7 +20,7 @@ from .geometry import TwoLevelGeometry
 from .regrid import (
     enforce_two_level_grading_set,
     gradient_magnitude,
-    gradient_tag_set,
+    gradient_tag_threshold_set,
 )
 from subsetix_cupy.expressions import IntervalSet
 
@@ -83,7 +83,7 @@ class SimulationConfig:
     coarse_resolution: int
     velocity: tuple[float, float]
     cfl: float = 0.9
-    refine_fraction: float = 0.1
+    refine_threshold: float = 0.05
     grading: int = 1
     grading_mode: str = "von_neumann"
     bc: str = "clamp"
@@ -220,6 +220,8 @@ class AMR2Simulation:
             raise ValueError("bc must be 'clamp' or 'wrap'")
         if self.config.grading_mode not in {"von_neumann", "moore"}:
             raise ValueError("grading_mode must be 'von_neumann' or 'moore'")
+        if self.config.refine_threshold <= 0.0:
+            raise ValueError("refine_threshold must be > 0")
 
     def _require_state(self) -> AMRState:
         if self.state is None:
@@ -232,7 +234,7 @@ class AMR2Simulation:
 
     def _refine_from_gradient(self, field: cp.ndarray) -> IntervalSet:
         grad = gradient_magnitude(field)
-        tagged = gradient_tag_set(grad, self.config.refine_fraction)
+        tagged = gradient_tag_threshold_set(grad, self.config.refine_threshold)
         graded = enforce_two_level_grading_set(
             tagged,
             padding=self.config.grading,

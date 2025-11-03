@@ -35,7 +35,7 @@ class RunnerTest(unittest.TestCase):
                 tf=0.01,
                 min_level=2,
                 max_level=3,
-                refine_fraction=0.2,
+                refine_threshold=0.05,
                 grading=1,
             ),
             init_fn,

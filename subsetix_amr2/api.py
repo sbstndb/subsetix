@@ -9,7 +9,7 @@ import cupy as cp
 
 from .fields import prolong_coarse_to_fine, synchronize_two_level
 from .geometry import TwoLevelGeometry
-from .regrid import enforce_two_level_grading, gradient_magnitude, gradient_tag
+from .regrid import enforce_two_level_grading, gradient_magnitude, gradient_tag_threshold
 
 
 @dataclass(frozen=True)
@@ -110,16 +110,16 @@ def make_scalar_field(name: str, mesh: TwoLevelMesh, *, dtype: cp.dtype = cp.flo
 class MRAdaptor:
     """Gradient-based refinement updater."""
 
-    def __init__(self, field: ScalarField, *, refine_fraction: float, grading: int, mode: str = "von_neumann"):
+    def __init__(self, field: ScalarField, *, refine_threshold: float, grading: int, mode: str = "von_neumann"):
         self.field = field
         self.mesh = field.mesh
-        self.refine_fraction = float(refine_fraction)
+        self.refine_threshold = float(refine_threshold)
         self.grading = int(grading)
         self.mode = mode
 
     def __call__(self) -> None:
         grad = gradient_magnitude(self.field.coarse)
-        tags = gradient_tag(grad, self.refine_fraction)
+        tags = gradient_tag_threshold(grad, self.refine_threshold)
         graded = enforce_two_level_grading(tags, padding=self.grading, mode=self.mode)
         geometry = self.mesh.regrid(graded)
         prolong_coarse_to_fine(self.field.coarse, self.mesh.ratio, out=self.field.fine, mask=geometry.fine_mask)

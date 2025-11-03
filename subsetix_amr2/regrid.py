@@ -94,6 +94,52 @@ def _empty_interval_set(rows: int) -> IntervalSet:
     return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
 
 
+def _intervals_above_threshold(
+    data: cp.ndarray,
+    threshold: float,
+) -> IntervalSet:
+    cp_mod = _require_cupy()
+    if data.ndim != 2:
+        raise ValueError("data must be 2D")
+    rows, width = data.shape
+    if rows == 0 or width == 0:
+        return _empty_interval_set(rows)
+
+    counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
+    _COUNT_INTERVALS(
+        (rows,),
+        (1,),
+        (
+            data,
+            cp_mod.int32(rows),
+            cp_mod.int32(width),
+            cp_mod.float32(threshold),
+            counts,
+        ),
+    )
+    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
+    row_offsets[0] = 0
+    cp_mod.cumsum(counts, dtype=cp_mod.int32, out=row_offsets[1:])
+    total = int(row_offsets[-1].item()) if rows > 0 else 0
+    begin = cp_mod.empty(total, dtype=cp_mod.int32)
+    end = cp_mod.empty_like(begin)
+    if total > 0:
+        _WRITE_INTERVALS(
+            (rows,),
+            (1,),
+            (
+                data,
+                cp_mod.int32(rows),
+                cp_mod.int32(width),
+                cp_mod.float32(threshold),
+                row_offsets,
+                begin,
+                end,
+            ),
+        )
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+
+
 def gradient_magnitude(field: cp.ndarray) -> cp.ndarray:
     """
     Return sqrt((du/dx)^2 + (du/dy)^2) using first-order differences.
@@ -130,42 +176,26 @@ def gradient_tag_set(
     idx = int(positive.size) - count
     part = cp_mod.partition(positive, idx)
     threshold = max(float(part[idx]), float(epsilon))
-    width = data.shape[1]
-    counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
-    if rows > 0:
-        _COUNT_INTERVALS(
-            (rows,),
-            (1,),
-            (
-                data,
-                cp_mod.int32(rows),
-                cp_mod.int32(width),
-                cp_mod.float32(threshold),
-                counts,
-            ),
-        )
-    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
-    row_offsets[0] = 0
-    if rows > 0:
-        cp_mod.cumsum(counts, dtype=cp_mod.int32, out=row_offsets[1:])
-    total = int(row_offsets[-1].item()) if rows > 0 else 0
-    begin = cp_mod.empty(total, dtype=cp_mod.int32)
-    end = cp_mod.empty_like(begin)
-    if total > 0:
-        _WRITE_INTERVALS(
-            (rows,),
-            (1,),
-            (
-                data,
-                cp_mod.int32(rows),
-                cp_mod.int32(width),
-                cp_mod.float32(threshold),
-                row_offsets,
-                begin,
-                end,
-            ),
-        )
-    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+    return _intervals_above_threshold(data, threshold)
+
+
+def gradient_tag_threshold_set(
+    values: cp.ndarray,
+    threshold: float,
+    *,
+    epsilon: float = 1e-8,
+) -> IntervalSet:
+    """Tag gradients above ``threshold`` as an IntervalSet."""
+
+    cp_mod = _require_cupy()
+    data = cp_mod.asarray(values, dtype=cp_mod.float32)
+    if data.ndim != 2:
+        raise ValueError("values must be a 2D array")
+    rows = data.shape[0]
+    if data.size == 0:
+        return _empty_interval_set(rows)
+    thresh = max(float(threshold), float(epsilon))
+    return _intervals_above_threshold(data, thresh)
 
 
 def gradient_tag(
@@ -177,6 +207,18 @@ def gradient_tag(
     """Wrapper returning a dense mask for backwards compatibility."""
 
     interval = gradient_tag_set(values, frac_high, epsilon=epsilon)
+    return interval_set_to_mask(interval, values.shape[1])
+
+
+def gradient_tag_threshold(
+    values: cp.ndarray,
+    threshold: float,
+    *,
+    epsilon: float = 1e-8,
+) -> cp.ndarray:
+    """Dense-mask wrapper for ``gradient_tag_threshold_set``."""
+
+    interval = gradient_tag_threshold_set(values, threshold, epsilon=epsilon)
     return interval_set_to_mask(interval, values.shape[1])
 
 
