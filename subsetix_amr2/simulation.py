@@ -355,5 +355,5 @@ def _step_upwind(u: cp.ndarray, a: float, b: float, dt: float, dx: float, dy: fl
 
 
 _DEFAULT_SQUARES: list[SquareSpec] = [
-    SquareSpec(center=(0.20, 0.20), half_width=(0.10, 0.10)),
+    SquareSpec(center=(0.30, 0.30), half_width=(0.10, 0.10)),
 ]
