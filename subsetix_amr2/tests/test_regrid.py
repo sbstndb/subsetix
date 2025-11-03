@@ -71,6 +71,21 @@ class RegridTest(unittest.TestCase):
         expected = _make_interval_set(self.cp, 4, {2: [(2, 3)]})
         _assert_interval_equal(self, self.cp, tagged_set, expected)
 
+    def test_gradient_tag_threshold_single_column(self) -> None:
+        data = self.cp.asarray([[0.0], [0.3], [0.6], [1.0]], dtype=self.cp.float32)
+        threshold = 0.25
+        tagged_set = gradient_tag_threshold_set(data, threshold=threshold)
+        expected = _make_interval_set(
+            self.cp,
+            4,
+            {
+                1: [(0, 1)],
+                2: [(0, 1)],
+                3: [(0, 1)],
+            },
+        )
+        _assert_interval_equal(self, self.cp, tagged_set, expected)
+
     def test_gradient_tag_custom_epsilon(self) -> None:
         data = self.cp.full((4, 4), 1e-9, dtype=self.cp.float32)
         tagged_set = gradient_tag_set(data, frac_high=0.2, epsilon=1e-8)

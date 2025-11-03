@@ -120,6 +120,52 @@ _WRITE_INTERVALS = cp.RawKernel(
     options=("--std=c++11",),
 )
 
+_GRADIENT_MAGNITUDE_KERNEL = cp.RawKernel(
+    r"""
+    extern "C" __global__
+    void subsetix_gradient_magnitude(const float* __restrict__ data,
+                                     int rows,
+                                     int width,
+                                     float* __restrict__ output)
+    {
+        int x = blockDim.x * blockIdx.x + threadIdx.x;
+        int y = blockDim.y * blockIdx.y + threadIdx.y;
+        if (x >= width || y >= rows) {
+            return;
+        }
+        int row_offset = y * width;
+        int idx = row_offset + x;
+        float center = data[idx];
+
+        float gx = 0.0f;
+        if (width > 1) {
+            if (x == 0) {
+                gx = data[row_offset + 1] - center;
+            } else if (x == width - 1) {
+                gx = center - data[row_offset + x - 1];
+            } else {
+                gx = (data[row_offset + x + 1] - data[row_offset + x - 1]) * 0.5f;
+            }
+        }
+
+        float gy = 0.0f;
+        if (rows > 1) {
+            if (y == 0) {
+                gy = data[(y + 1) * width + x] - center;
+            } else if (y == rows - 1) {
+                gy = center - data[(y - 1) * width + x];
+            } else {
+                gy = (data[(y + 1) * width + x] - data[(y - 1) * width + x]) * 0.5f;
+            }
+        }
+
+        output[idx] = sqrtf(gx * gx + gy * gy);
+    }
+    """,
+    "subsetix_gradient_magnitude",
+    options=("--std=c++11",),
+)
+
 def _empty_interval_set(rows: int) -> IntervalSet:
     cp_mod = _require_cupy()
     zero = cp_mod.zeros(0, dtype=cp_mod.int32)
@@ -178,8 +224,30 @@ def gradient_magnitude(field: cp.ndarray) -> cp.ndarray:
     Return sqrt((du/dx)^2 + (du/dy)^2) using first-order differences.
     """
 
-    gx, gy = cp.gradient(field)
-    return cp.sqrt(gx * gx + gy * gy)
+    cp_mod = _require_cupy()
+    data = cp_mod.asarray(field, dtype=cp_mod.float32)
+    if data.ndim != 2:
+        raise ValueError("field must be a 2D array")
+    rows, width = data.shape
+    if rows == 0 or width == 0:
+        return cp_mod.zeros_like(data)
+    out = cp_mod.empty_like(data)
+    block = (32, 8)
+    grid = (
+        (width + block[0] - 1) // block[0],
+        (rows + block[1] - 1) // block[1],
+    )
+    _GRADIENT_MAGNITUDE_KERNEL(
+        grid,
+        block,
+        (
+            data,
+            cp_mod.int32(rows),
+            cp_mod.int32(width),
+            out,
+        ),
+    )
+    return out
 
 
 def gradient_tag_set(
