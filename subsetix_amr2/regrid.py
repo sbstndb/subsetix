@@ -226,7 +226,8 @@ def _empty_interval_set(rows: int) -> IntervalSet:
     cp_mod = _require_cupy()
     zero = cp_mod.zeros(0, dtype=cp_mod.int32)
     offsets = cp_mod.zeros(rows + 1, dtype=cp_mod.int32)
-    return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+    rows_arr = cp_mod.arange(rows, dtype=cp_mod.int32) if rows > 0 else zero
+    return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_arr)
 
 
 def gradient_magnitude_interval_field(
@@ -328,7 +329,8 @@ def intervals_above_threshold_interval_field(
                 end,
             ),
         )
-    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+    rows = cp_mod.arange(height, dtype=cp_mod.int32) if height > 0 else cp_mod.zeros(0, dtype=cp_mod.int32)
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets, rows=rows)
 
 
 def gradient_tag_threshold_interval_field(

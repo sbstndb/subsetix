@@ -31,10 +31,12 @@ def _central_refine(cp_mod, height: int, width: int, margin: float = 0.25) -> In
             begins.append(x0)
             ends.append(x1)
         row_offsets.append(len(begins))
+    rows_arr = cp_mod.arange(height, dtype=cp_mod.int32)
     return IntervalSet(
         begin=cp_mod.asarray(begins, dtype=cp_mod.int32),
         end=cp_mod.asarray(ends, dtype=cp_mod.int32),
         row_offsets=cp_mod.asarray(row_offsets, dtype=cp_mod.int32),
+        rows=rows_arr,
     )
 
 

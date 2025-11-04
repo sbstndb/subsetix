@@ -132,13 +132,6 @@ def _reindex_interval_set(interval_set: "IntervalSet", rows_out) -> "IntervalSet
     end_in = cp.asarray(interval_set.end, dtype=cp.int32)
 
     if rows_in.size == rows_out.size and bool(cp.all(rows_in == rows_out)):
-        if interval_set.rows is None:
-            return IntervalSet(
-                begin=begin_in,
-                end=end_in,
-                row_offsets=row_offsets_in,
-                rows=rows_out,
-            )
         return IntervalSet(
             begin=begin_in,
             end=end_in,
@@ -201,21 +194,7 @@ def _align_interval_sets(lhs: "IntervalSet", rhs: "IntervalSet") -> tuple[Interv
     rows_l = lhs.rows_index()
     rows_r = rhs.rows_index()
     if rows_l.size == rows_r.size and bool(rows_l.size == 0 or cp.all(rows_l == rows_r)):
-        # Ensure dense inputs carry an explicit rows array if needed by the caller.
-        rows_out = rows_l
-        lhs_aligned = lhs if lhs.rows is not None else IntervalSet(
-            begin=cp.asarray(lhs.begin, dtype=cp.int32),
-            end=cp.asarray(lhs.end, dtype=cp.int32),
-            row_offsets=cp.asarray(lhs.row_offsets, dtype=cp.int32),
-            rows=rows_out,
-        )
-        rhs_aligned = rhs if rhs.rows is not None else IntervalSet(
-            begin=cp.asarray(rhs.begin, dtype=cp.int32),
-            end=cp.asarray(rhs.end, dtype=cp.int32),
-            row_offsets=cp.asarray(rhs.row_offsets, dtype=cp.int32),
-            rows=rows_out,
-        )
-        return lhs_aligned, rhs_aligned, rows_out
+        return lhs, rhs, rows_l
 
     rows_out = cp.union1d(rows_l, rows_r).astype(cp.int32, copy=False)
     lhs_aligned = _reindex_interval_set(lhs, rows_out)
@@ -229,10 +208,9 @@ class IntervalSet:
     Representation of a collection of half-open [begin, end) intervals.
 
     Intervals are stored in a compressed-row layout where `row_offsets`
-    contains the exclusive prefix sums for each logical row. When ``rows``
-    is ``None`` the row ids are assumed to be the dense range ``[0, row_count)``;
-    otherwise ``rows`` provides the sparse row identifiers (sorted and
-    strictly increasing).
+    contains the exclusive prefix sums for each logical row. The ``rows``
+    array holds the (sorted, strictly increasing) row identifiers; when
+    omitted the layout defaults to the dense range ``[0, row_count)``.
     """
 
     begin: Any
@@ -287,47 +265,29 @@ class IntervalSet:
 
         row_count = int(offsets_arr.size - 1)
 
-        rows_arr = self.rows
-        if rows_arr is not None:
-            if isinstance(rows_arr, cp.ndarray):
-                if rows_arr.dtype != cp.int32:
-                    raise TypeError("rows must use int32 precision")
-            else:
-                if np.asarray(rows_arr).dtype != np.int32:
-                    raise TypeError("rows must use int32 precision")
-
-            if hasattr(rows_arr, "ndim"):
-                if rows_arr.ndim != 1:
-                    raise ValueError("rows must be one-dimensional")
-            else:
-                if np.asarray(rows_arr).ndim != 1:
-                    raise ValueError("rows must be one-dimensional")
-
-            length = rows_arr.size if hasattr(rows_arr, "size") else np.asarray(rows_arr).size
+        rows_attr = self.rows
+        if rows_attr is None:
+            rows_arr = cp.arange(row_count, dtype=cp.int32)
+        else:
+            rows_arr = cp.asarray(rows_attr, dtype=cp.int32)
+            if rows_arr.ndim != 1:
+                raise ValueError("rows must be one-dimensional")
+            length = int(rows_arr.size)
             if length != row_count:
                 raise ValueError("rows length must match row_offsets size - 1")
-
             if length > 1:
-                if isinstance(rows_arr, cp.ndarray):
-                    diffs = rows_arr[1:] - rows_arr[:-1]
-                    if not bool(cp.all(diffs > 0)):
-                        raise ValueError("rows must be strictly increasing")
-                else:
-                    arr = np.asarray(rows_arr)
-                    if not np.all(arr[1:] - arr[:-1] > 0):
-                        raise ValueError("rows must be strictly increasing")
+                diffs = rows_arr[1:] - rows_arr[:-1]
+                if not bool(cp.all(diffs > 0)):
+                    raise ValueError("rows must be strictly increasing")
+
+        object.__setattr__(self, "rows", rows_arr)
 
     @property
     def row_count(self) -> int:
         return int(self.row_offsets.size - 1)
 
     def rows_index(self):
-        cp = _require_cupy()
-        if self.row_count == 0:
-            return cp.zeros(0, dtype=cp.int32)
-        if self.rows is None:
-            return cp.arange(self.row_count, dtype=cp.int32)
-        return cp.asarray(self.rows, dtype=cp.int32)
+        return self.rows
 
     def interval_rows(self):
         cp = _require_cupy()
@@ -597,7 +557,7 @@ def _apply_binary_gpu(
     total = int(offsets[-1].get())
     if total == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        rows_out = cp.asarray(rows_index, dtype=cp.int32) if rows_index is not None else None
+        rows_out = cp.asarray(rows_index, dtype=cp.int32)
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
 
     if workspace is not None:
@@ -624,7 +584,7 @@ def _apply_binary_gpu(
         ),
     )
 
-    rows_out = cp.asarray(rows_index, dtype=cp.int32) if rows_index is not None else None
+    rows_out = cp.asarray(rows_index, dtype=cp.int32)
     return IntervalSet(begin=out_begin, end=out_end, row_offsets=offsets, rows=rows_out)
 _OPERATION_CODES = {"union": 0, "intersection": 1, "difference": 2}
 

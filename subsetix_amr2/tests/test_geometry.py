@@ -5,11 +5,18 @@ from subsetix_amr2.geometry import TwoLevelGeometry
 from subsetix_cupy.expressions import IntervalSet, _REAL_CUPY
 
 
-def _make_interval_set(cp_mod, height, spans):
+def _make_interval_set(cp_mod, height, spans, *, rows=None):
     begins = []
     ends = []
     row_offsets = [0]
-    for row in range(height):
+    if rows is None:
+        row_ids = list(range(height))
+    else:
+        row_ids = sorted(set(rows))
+    extra = sorted(set(spans.keys()) - set(row_ids))
+    row_ids.extend(extra)
+    row_ids.sort()
+    for row in row_ids:
         intervals = spans.get(row, ())
         for start, stop in intervals:
             begins.append(int(start))
@@ -18,13 +25,15 @@ def _make_interval_set(cp_mod, height, spans):
     begin_arr = cp_mod.asarray(begins, dtype=cp_mod.int32)
     end_arr = cp_mod.asarray(ends, dtype=cp_mod.int32)
     offsets_arr = cp_mod.asarray(row_offsets, dtype=cp_mod.int32)
-    return IntervalSet(begin=begin_arr, end=end_arr, row_offsets=offsets_arr)
+    rows_arr = cp_mod.asarray(row_ids, dtype=cp_mod.int32)
+    return IntervalSet(begin=begin_arr, end=end_arr, row_offsets=offsets_arr, rows=rows_arr)
 
 
 def _empty_interval_set(cp_mod, height):
     zeros = cp_mod.zeros(0, dtype=cp_mod.int32)
     offsets = cp_mod.zeros(height + 1, dtype=cp_mod.int32)
-    return IntervalSet(begin=zeros, end=zeros, row_offsets=offsets)
+    rows_arr = cp_mod.arange(height, dtype=cp_mod.int32)
+    return IntervalSet(begin=zeros, end=zeros, row_offsets=offsets, rows=rows_arr)
 
 
 def _assert_interval_equal(testcase, cp_mod, actual: IntervalSet, expected: IntervalSet):
@@ -32,6 +41,7 @@ def _assert_interval_equal(testcase, cp_mod, actual: IntervalSet, expected: Inte
     cp_mod.testing.assert_array_equal(actual.row_offsets, expected.row_offsets)
     cp_mod.testing.assert_array_equal(actual.begin, expected.begin)
     cp_mod.testing.assert_array_equal(actual.end, expected.end)
+    cp_mod.testing.assert_array_equal(actual.rows_index(), expected.rows_index())
 
 
 @unittest.skipUnless(_REAL_CUPY is not None, "CuPy backend with CUDA required")
@@ -79,6 +89,7 @@ class GeometryTest(unittest.TestCase):
                 4: [(2, 6)],
                 5: [(2, 6)],
             },
+            rows=[2, 3, 4, 5],
         )
         _assert_interval_equal(self, self.cp, geom.fine, expected_fine)
 

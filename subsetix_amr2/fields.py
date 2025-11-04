@@ -307,7 +307,15 @@ def _gather_subset_into(field: IntervalField, subset_field: IntervalField) -> No
     kernel = _get_interval_subset_kernel("gather", subset_field.values.dtype)
     block = 128
     grid = (interval_count,)
-    subset_rows = subset_field.interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    subset_rows_actual = subset_field.interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    if subset_rows_actual.size > 0:
+        super_rows = field.interval_set.rows_index().astype(cp_mod.int32, copy=False)
+        positions = cp_mod.searchsorted(super_rows, subset_rows_actual, side="left")
+        if int(cp_mod.any(super_rows.take(positions) != subset_rows_actual).item()):
+            raise ValueError("subset rows must be contained within the source field")
+        subset_rows = positions.astype(cp_mod.int32, copy=False)
+    else:
+        subset_rows = subset_rows_actual
     subset_begin = subset_field.interval_set.begin.astype(cp_mod.int32, copy=False)
     subset_end = subset_field.interval_set.end.astype(cp_mod.int32, copy=False)
     subset_offsets = subset_field.interval_cell_offsets.astype(cp_mod.int32, copy=False)
@@ -342,7 +350,15 @@ def _scatter_subset_from(subset_field: IntervalField, field: IntervalField) -> N
     kernel = _get_interval_subset_kernel("scatter", subset_field.values.dtype)
     block = 128
     grid = (interval_count,)
-    subset_rows = subset_field.interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    subset_rows_actual = subset_field.interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    if subset_rows_actual.size > 0:
+        super_rows = field.interval_set.rows_index().astype(cp_mod.int32, copy=False)
+        positions = cp_mod.searchsorted(super_rows, subset_rows_actual, side="left")
+        if int(cp_mod.any(super_rows.take(positions) != subset_rows_actual).item()):
+            raise ValueError("subset rows must be contained within the destination field")
+        subset_rows = positions.astype(cp_mod.int32, copy=False)
+    else:
+        subset_rows = subset_rows_actual
     subset_begin = subset_field.interval_set.begin.astype(cp_mod.int32, copy=False)
     subset_end = subset_field.interval_set.end.astype(cp_mod.int32, copy=False)
     subset_offsets = subset_field.interval_cell_offsets.astype(cp_mod.int32, copy=False)

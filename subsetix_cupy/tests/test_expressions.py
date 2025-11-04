@@ -49,7 +49,7 @@ class ExpressionTest(unittest.TestCase):
             end=[10, 9],
         )
 
-    def _assert_interval_set(self, result, begin, end, row_offsets):
+    def _assert_interval_set(self, result, begin, end, row_offsets, rows=None):
         cp = _REAL_CUPY
         assert cp is not None
         np.testing.assert_array_equal(
@@ -61,6 +61,21 @@ class ExpressionTest(unittest.TestCase):
         np.testing.assert_array_equal(
             cp.asnumpy(result.row_offsets), np.array(row_offsets, dtype=np.int32)
         )
+        expected_rows = rows if rows is not None else list(range(len(row_offsets) - 1))
+        np.testing.assert_array_equal(
+            cp.asnumpy(result.rows_index()), np.array(expected_rows, dtype=np.int32)
+        )
+
+    def test_interval_set_rows_always_present(self) -> None:
+        cp = _REAL_CUPY
+        assert cp is not None
+        interval = build_interval_set(
+            row_offsets=[0, 2, 5],
+            begin=[0, 3, 1, 4, 6],
+            end=[2, 6, 3, 5, 7],
+        )
+        self.assertIsInstance(interval.rows, cp.ndarray)
+        np.testing.assert_array_equal(cp.asnumpy(interval.rows_index()), np.array([0, 1], dtype=np.int32))
 
     def test_nested_expression(self) -> None:
         expr = make_union(
@@ -113,6 +128,7 @@ class ExpressionTest(unittest.TestCase):
             begin=[0, 3],
             end=[2, 4],
             row_offsets=[0, 1, 2],
+            rows=[5, 7],
         )
 
     def test_symmetric_difference(self) -> None:

@@ -23,7 +23,8 @@ def _make_interval_set(cp_mod, height, spans):
     begin_arr = cp_mod.asarray(begins, dtype=cp_mod.int32)
     end_arr = cp_mod.asarray(ends, dtype=cp_mod.int32)
     offsets_arr = cp_mod.asarray(row_offsets, dtype=cp_mod.int32)
-    return IntervalSet(begin=begin_arr, end=end_arr, row_offsets=offsets_arr)
+    rows_arr = cp_mod.arange(height, dtype=cp_mod.int32)
+    return IntervalSet(begin=begin_arr, end=end_arr, row_offsets=offsets_arr, rows=rows_arr)
 
 
 def _field_from_array(cp_mod, array):

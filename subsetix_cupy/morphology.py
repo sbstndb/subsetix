@@ -20,7 +20,7 @@ def _clone_interval_set(interval_set: IntervalSet) -> IntervalSet:
         begin=cp.array(interval_set.begin, dtype=cp.int32, copy=True),
         end=cp.array(interval_set.end, dtype=cp.int32, copy=True),
         row_offsets=cp.array(interval_set.row_offsets, dtype=cp.int32, copy=True),
-        rows=cp.array(interval_set.rows, dtype=cp.int32, copy=True) if interval_set.rows is not None else None,
+        rows=cp.array(interval_set.rows, dtype=cp.int32, copy=True),
     )
 
 
@@ -144,21 +144,9 @@ def translate_interval_set(interval_set: IntervalSet, dx: int = 0, dy: int = 0) 
 
     row_offsets = cp.array(interval_set.row_offsets, dtype=cp.int32, copy=True)
 
-    if interval_set.rows is None:
-        rows_out = None
-        if dy_int:
-            if interval_set.row_count == 0:
-                rows_out = cp.zeros(0, dtype=cp.int32)
-            else:
-                rows_out = cp.arange(interval_set.row_count, dtype=cp.int32) + dy_int
-    else:
-        rows_out = cp.array(interval_set.rows, dtype=cp.int32, copy=True)
-        if dy_int and rows_out.size > 0:
-            rows_out += dy_int
-    if rows_out is None:
-        return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
-    if rows_out.size == 0:
-        rows_out = cp.zeros(0, dtype=cp.int32)
+    rows_out = cp.array(interval_set.rows, dtype=cp.int32, copy=True)
+    if dy_int and rows_out.size > 0:
+        rows_out += dy_int
     return IntervalSet(begin=begin, end=end, row_offsets=row_offsets, rows=rows_out)
 
 

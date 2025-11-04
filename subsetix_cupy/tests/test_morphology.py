@@ -55,7 +55,7 @@ class MorphologyTest(unittest.TestCase):
         translated = translate_interval_set(base, dx=3, dy=0)
         rows = _rows_to_python(translated, self.cp)
         self.assertEqual(rows[0], [(4, 5), (7, 8)])
-        self.assertIsNone(translated.rows)
+        self.assertEqual(self.cp.asnumpy(translated.rows_index()).tolist(), [0])
 
     def test_translate_vertical_dense(self) -> None:
         base = build_interval_set(

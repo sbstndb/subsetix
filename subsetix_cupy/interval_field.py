@@ -89,13 +89,19 @@ def create_interval_field(
 
 def _locate_interval(interval_set: IntervalSet, row: int, x: int) -> int | None:
     cp = _require_cupy()
-    row_offsets = interval_set.row_offsets
-    row_count = row_offsets.size - 1
-    if row < 0 or row >= row_count:
+    row_value = int(row)
+    rows_index = interval_set.rows_index().astype(cp.int32, copy=False)
+    if rows_index.size == 0:
+        raise IndexError("row out of range")
+    row_value_arr = cp.asarray([row_value], dtype=cp.int32)
+    pos = int(cp.searchsorted(rows_index, row_value_arr, side="left").item())
+    if pos >= rows_index.size or int(rows_index[pos].item()) != row_value:
         raise IndexError("row out of range")
 
-    start = int(row_offsets[row].item())
-    stop = int(row_offsets[row + 1].item())
+    row_offsets = interval_set.row_offsets.astype(cp.int32, copy=False)
+
+    start = int(row_offsets[pos].item())
+    stop = int(row_offsets[pos + 1].item())
     if start == stop:
         return None
 

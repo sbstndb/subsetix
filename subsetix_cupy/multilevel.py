@@ -175,25 +175,39 @@ def _coarse_to_fine_interval_indices(
     if ratio < 1:
         raise ValueError("ratio must be >= 1")
 
-    coarse_row_count = coarse_set.row_count
-    expected_fine_rows = coarse_row_count * ratio
-    if fine_set.row_count != expected_fine_rows:
+    coarse_rows_index = coarse_set.rows_index()
+    fine_rows_index = fine_set.rows_index()
+    if coarse_rows_index.size == 0:
+        return cp.zeros(0, dtype=cp.int32)
+    expected_rows = coarse_rows_index[:, None] * ratio + cp.arange(ratio, dtype=cp.int32)[None, :]
+    expected_rows_flat = expected_rows.reshape(-1)
+    if fine_rows_index.size != expected_rows_flat.size:
         raise ValueError("fine set row count does not match coarse x ratio")
+    if int(cp.any(fine_rows_index != expected_rows_flat).item()):
+        raise ValueError("fine set rows do not align with refinement ratio")
 
     interval_count = coarse_set.begin.size
     if interval_count == 0:
         return cp.zeros(0, dtype=cp.int32)
 
-    coarse_rows = _row_ids(coarse_set).astype(cp.int32, copy=False)
+    coarse_rows_ord = _row_ids(coarse_set).astype(cp.int32, copy=False)
     coarse_row_offsets = coarse_set.row_offsets.astype(cp.int32, copy=False)
     ordinal = cp.arange(interval_count, dtype=cp.int32)
-    ordinal = ordinal - coarse_row_offsets.take(coarse_rows)
+    ordinal = ordinal - coarse_row_offsets.take(coarse_rows_ord)
 
+    coarse_rows_actual = coarse_rows_index[coarse_rows_ord]
     ratio_vec = cp.arange(ratio, dtype=cp.int32)
-    fine_rows = coarse_rows[:, None] * ratio + ratio_vec[None, :]
+    fine_row_values = coarse_rows_actual[:, None] * ratio + ratio_vec[None, :]
+    fine_row_ordinals = cp.searchsorted(fine_rows_index, fine_row_values, side="left")
+    fine_row_ordinals_flat = fine_row_ordinals.reshape(-1)
+    fine_row_values_flat = fine_row_values.reshape(-1)
+    if int(cp.any(fine_rows_index[fine_row_ordinals_flat] != fine_row_values_flat).item()):
+        raise ValueError("fine row ids missing expected refinement entries")
+
     fine_row_offsets = fine_set.row_offsets.astype(cp.int32, copy=False)
-    fine_interval_indices = fine_row_offsets[fine_rows] + ordinal[:, None]
-    return fine_interval_indices.reshape(-1).astype(cp.int32, copy=False)
+    ordinal_repeated = cp.repeat(ordinal, ratio)
+    fine_interval_indices_flat = fine_row_offsets[fine_row_ordinals_flat] + ordinal_repeated
+    return fine_interval_indices_flat.astype(cp.int32, copy=False)
 
 
 def _prolong_set_impl(interval_set: IntervalSet, ratio: int):
@@ -205,44 +219,49 @@ def _prolong_set_impl(interval_set: IntervalSet, ratio: int):
         return interval_set, base
 
     row_count = interval_set.row_count
+    rows_in = interval_set.rows_index()
+    ratio_vec = cp.arange(ratio, dtype=cp.int32)
+
     if row_count == 0 or interval_set.begin.size == 0:
-        zero = cp.zeros(0, dtype=cp.int32)
-        offsets = cp.zeros(row_count * ratio + 1, dtype=cp.int32)
-        fine_set = IntervalSet(begin=zero, end=zero, row_offsets=offsets)
+        fine_rows = rows_in[:, None] * ratio + ratio_vec[None, :] if row_count > 0 else cp.zeros((0, 0), dtype=cp.int32)
+        rows_out = cp.sort(fine_rows.reshape(-1)) if fine_rows.size else cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(rows_out.size + 1, dtype=cp.int32)
+        empty = cp.zeros(0, dtype=cp.int32)
+        fine_set = IntervalSet(begin=empty, end=empty, row_offsets=offsets, rows=rows_out)
         base = cp.zeros(0, dtype=cp.int32)
         return fine_set, base
 
     begin = interval_set.begin.astype(cp.int32, copy=False)
     end = interval_set.end.astype(cp.int32, copy=False)
-    row_ids = _row_ids(interval_set)
+    interval_count = begin.size
 
     scaled_begin = begin * ratio
     scaled_end = end * ratio
-    interval_count = begin.size
 
-    repeated_begin = cp.tile(scaled_begin, ratio)
-    repeated_end = cp.tile(scaled_end, ratio)
-    base_indices = cp.tile(cp.arange(interval_count, dtype=cp.int32), ratio)
-    base_rows = cp.tile(row_ids * ratio, ratio)
-    delta_offsets = cp.repeat(cp.arange(ratio, dtype=cp.int32), interval_count)
-    fine_rows = base_rows + delta_offsets
+    base_indices = cp.repeat(cp.arange(interval_count, dtype=cp.int32), ratio)
+    fine_row_values = interval_set.interval_rows().astype(cp.int32, copy=False)
+    fine_row_values = fine_row_values[:, None] * ratio + ratio_vec[None, :]
+    fine_rows_flat = fine_row_values.reshape(-1)
 
-    order = cp.lexsort(cp.stack((repeated_begin, fine_rows)))
-    fine_rows = fine_rows[order]
-    repeated_begin = repeated_begin[order]
-    repeated_end = repeated_end[order]
-    base_indices = base_indices[order]
+    repeated_begin = cp.repeat(scaled_begin, ratio)
+    repeated_end = cp.repeat(scaled_end, ratio)
 
-    fine_row_count = row_count * ratio
-    counts = cp.bincount(fine_rows, minlength=fine_row_count)
-    counts = counts.astype(cp.int32, copy=False)
-    row_offsets_fine = cp.empty(fine_row_count + 1, dtype=cp.int32)
-    row_offsets_fine[0] = 0
-    if fine_row_count > 0:
-        cp.cumsum(counts, dtype=cp.int32, out=row_offsets_fine[1:])
+    order = cp.lexsort(cp.stack((repeated_begin, fine_rows_flat)))
+    fine_rows_sorted = fine_rows_flat[order]
+    begin_sorted = repeated_begin[order]
+    end_sorted = repeated_end[order]
+    base_sorted = base_indices[order]
 
-    fine_set = IntervalSet(begin=repeated_begin, end=repeated_end, row_offsets=row_offsets_fine)
-    return fine_set, base_indices
+    rows_out = cp.unique(fine_rows_sorted)
+    positions = cp.searchsorted(rows_out, fine_rows_sorted, side="left")
+    counts = cp.bincount(positions, minlength=rows_out.size).astype(cp.int32, copy=False)
+    row_offsets = cp.empty(rows_out.size + 1, dtype=cp.int32)
+    row_offsets[0] = 0
+    if rows_out.size > 0:
+        cp.cumsum(counts, dtype=cp.int32, out=row_offsets[1:])
+
+    fine_set = IntervalSet(begin=begin_sorted, end=end_sorted, row_offsets=row_offsets, rows=rows_out)
+    return fine_set, base_sorted
 
 
 def prolong_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
@@ -255,24 +274,28 @@ def restrict_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
     if ratio < 1:
         raise ValueError("ratio must be >= 1")
     row_count = interval_set.row_count
-    if row_count == 0 or interval_set.begin.size == 0:
-        offsets = cp.zeros(row_count // max(ratio, 1) + 1, dtype=cp.int32)
-        empty = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=empty, end=empty, row_offsets=offsets)
-    if row_count % ratio != 0:
-        raise ValueError("row count is not divisible by ratio")
+    rows_in = interval_set.rows_index()
+    empty = cp.zeros(0, dtype=cp.int32)
 
-    row_ids = _row_ids(interval_set)
-    coarse_rows = row_ids // ratio
+    if row_count == 0:
+        offsets = cp.zeros(1, dtype=cp.int32)
+        return IntervalSet(begin=empty, end=empty, row_offsets=offsets, rows=empty)
+
+    if interval_set.begin.size == 0:
+        coarse_rows_unique = cp.unique(rows_in // ratio)
+        offsets = cp.zeros(coarse_rows_unique.size + 1, dtype=cp.int32)
+        return IntervalSet(begin=empty, end=empty, row_offsets=offsets, rows=coarse_rows_unique)
+
+    interval_rows = interval_set.interval_rows().astype(cp.int32, copy=False)
+    coarse_rows = interval_rows // ratio
 
     coarse_begin = interval_set.begin.astype(cp.int32, copy=False) // ratio
     coarse_end = _ceil_div(interval_set.end.astype(cp.int32, copy=False), ratio)
     mask = coarse_end > coarse_begin
     if not int(mask.any().item()):
-        coarse_row_count = row_count // ratio
-        offsets = cp.zeros(coarse_row_count + 1, dtype=cp.int32)
-        empty = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=empty, end=empty, row_offsets=offsets)
+        coarse_rows_unique = cp.unique(coarse_rows)
+        offsets = cp.zeros(coarse_rows_unique.size + 1, dtype=cp.int32)
+        return IntervalSet(begin=empty, end=empty, row_offsets=offsets, rows=coarse_rows_unique)
 
     coarse_rows = coarse_rows[mask]
     coarse_begin = coarse_begin[mask]
@@ -284,19 +307,20 @@ def restrict_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
     coarse_begin = coarse_begin[order]
     coarse_end = coarse_end[order]
 
-    coarse_row_count = row_count // ratio
-    counts_raw = cp.bincount(coarse_rows, minlength=coarse_row_count).astype(cp.int32, copy=False)
-    row_offsets_raw = cp.empty(coarse_row_count + 1, dtype=cp.int32)
+    rows_out = cp.unique(coarse_rows)
+    positions = cp.searchsorted(rows_out, coarse_rows, side="left")
+    counts_raw = cp.bincount(positions, minlength=rows_out.size).astype(cp.int32, copy=False)
+    row_offsets_raw = cp.empty(rows_out.size + 1, dtype=cp.int32)
     row_offsets_raw[0] = 0
-    if coarse_row_count > 0:
+    if rows_out.size > 0:
         cp.cumsum(counts_raw, dtype=cp.int32, out=row_offsets_raw[1:])
 
     merge_count_kernel = get_kernels(cp)[3]
     merge_write_kernel = get_kernels(cp)[4]
 
     block = 128
-    grid = (coarse_row_count + block - 1) // block if coarse_row_count > 0 else 1
-    counts_out = cp.empty(coarse_row_count, dtype=cp.int32)
+    grid = (rows_out.size + block - 1) // block if rows_out.size > 0 else 1
+    counts_out = cp.empty(rows_out.size, dtype=cp.int32)
 
     merge_count_kernel(
         (grid,),
@@ -305,19 +329,18 @@ def restrict_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
             coarse_begin,
             coarse_end,
             row_offsets_raw,
-            np.int32(coarse_row_count),
+            np.int32(rows_out.size),
             counts_out,
         ),
     )
 
-    row_offsets = cp.empty(coarse_row_count + 1, dtype=cp.int32)
+    row_offsets = cp.empty(rows_out.size + 1, dtype=cp.int32)
     row_offsets[0] = 0
-    if coarse_row_count > 0:
+    if rows_out.size > 0:
         cp.cumsum(counts_out, dtype=cp.int32, out=row_offsets[1:])
-    total = int(row_offsets[-1].item()) if coarse_row_count > 0 else 0
+    total = int(row_offsets[-1].item()) if rows_out.size > 0 else 0
     if total == 0:
-        empty = cp.zeros(0, dtype=cp.int32)
-        return IntervalSet(begin=empty, end=empty, row_offsets=row_offsets)
+        return IntervalSet(begin=empty, end=empty, row_offsets=row_offsets, rows=rows_out)
 
     out_begin = cp.empty(total, dtype=cp.int32)
     out_end = cp.empty(total, dtype=cp.int32)
@@ -330,13 +353,13 @@ def restrict_set(interval_set: IntervalSet, ratio: int) -> IntervalSet:
             coarse_end,
             row_offsets_raw,
             row_offsets,
-            np.int32(coarse_row_count),
+            np.int32(rows_out.size),
             out_begin,
             out_end,
         ),
     )
 
-    return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets)
+    return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets, rows=rows_out)
 
 
 def prolong_field(field: IntervalField, ratio: int) -> IntervalField:
