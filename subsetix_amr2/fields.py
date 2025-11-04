@@ -28,6 +28,8 @@ def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
 
 
 def _empty_interval_like(interval_set: IntervalSet) -> IntervalSet:
+    if not isinstance(interval_set, IntervalSet):
+        raise TypeError("interval_set must be an IntervalSet")
     cp_mod = _require_cupy()
     row_count = interval_set.row_count
     zero = cp_mod.zeros(0, dtype=cp_mod.int32)
@@ -390,6 +392,10 @@ def gather_interval_subset(field: IntervalField, subset: IntervalSet) -> Interva
     Extract a subset of ``field`` described by ``subset`` into a new IntervalField.
     """
 
+    if not isinstance(field, IntervalField):
+        raise TypeError("field must be an IntervalField")
+    if not isinstance(subset, IntervalSet):
+        raise TypeError("subset must be an IntervalSet")
     subset_field = create_interval_field(subset, fill_value=0.0, dtype=field.values.dtype)
     _gather_subset_into(field, subset_field)
     return subset_field
@@ -400,10 +406,16 @@ def scatter_interval_subset(field: IntervalField, subset_field: IntervalField) -
     Scatter values from ``subset_field`` back into ``field`` at matching coordinates.
     """
 
+    if not isinstance(field, IntervalField):
+        raise TypeError("field must be an IntervalField")
+    if not isinstance(subset_field, IntervalField):
+        raise TypeError("subset_field must be an IntervalField")
     _scatter_subset_from(subset_field, field)
 
 
 def clone_interval_field(field: IntervalField) -> IntervalField:
+    if not isinstance(field, IntervalField):
+        raise TypeError("field must be an IntervalField")
     cp_mod = _require_cupy()
     return IntervalField(
         interval_set=field.interval_set,
@@ -458,6 +470,8 @@ class ActionField:
         ratio: int,
         default: Action = Action.KEEP,
     ) -> "ActionField":
+        if not isinstance(interval_set, IntervalSet):
+            raise TypeError("interval_set must be an IntervalSet")
         cp_mod = _require_cupy()
         width_int = int(width)
         height_int = int(height)
@@ -565,6 +579,10 @@ def synchronize_interval_fields(
 ) -> tuple[IntervalField, IntervalField]:
     """Synchronise interval-backed coarse/fine fields based on AMR actions."""
 
+    if not isinstance(coarse, IntervalField):
+        raise TypeError("coarse must be an IntervalField")
+    if not isinstance(fine, IntervalField):
+        raise TypeError("fine must be an IntervalField")
     if not isinstance(actions, ActionField):
         raise TypeError("actions must be an ActionField")
     if int(actions.ratio) != int(ratio):

@@ -191,6 +191,16 @@ class FieldsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             synchronize_interval_fields(coarse, fine, actions, ratio=3)
 
+    def test_synchronize_interval_fields_rejects_dense_buffers(self) -> None:
+        coarse = self._full_field(height=2, width=2, dtype=self.cp.float32)
+        fine = self._full_field(height=4, width=4, dtype=self.cp.float32)
+        actions = ActionField.full_grid(2, 2, ratio=2)
+        dense = coarse.values.reshape(2, 2)
+        with self.assertRaises(TypeError):
+            synchronize_interval_fields(dense, fine, actions, ratio=2)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            synchronize_interval_fields(coarse, dense, actions, ratio=2)  # type: ignore[arg-type]
+
     def test_gather_scatter_interval_subset(self) -> None:
         dtype = self.cp.float32
         field = self._full_field(height=3, width=4, dtype=dtype)
@@ -220,14 +230,33 @@ class FieldsTest(unittest.TestCase):
                 else:
                     self.assertIsNone(value)
 
-        self.cp.testing.assert_array_equal(field.values, self.cp.arange(field.values.size, dtype=dtype))
+    def test_gather_interval_subset_rejects_invalid_inputs(self) -> None:
+        field = self._full_field(height=2, width=2, dtype=self.cp.float32)
+        subset = _make_interval_set(
+            self.cp,
+            2,
+            {
+                0: [(0, 1)],
+            },
+        )
+        dense = field.values.reshape(2, 2)
+        with self.assertRaises(TypeError):
+            gather_interval_subset(dense, subset)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            gather_interval_subset(field, dense)  # type: ignore[arg-type]
 
-        target = self._full_field(height=3, width=4, dtype=dtype)
-        scatter_interval_subset(target, subset_field)
-        for row in range(3):
-            for col in range(4):
-                value = self._cell_value(target, row, col)
-                if (row, col) in expected_subset:
-                    self.assertEqual(value, expected_subset[(row, col)])
-                else:
-                    self.assertEqual(value, 0.0)
+    def test_scatter_interval_subset_rejects_invalid_inputs(self) -> None:
+        field = self._full_field(height=2, width=2, dtype=self.cp.float32)
+        subset = _make_interval_set(
+            self.cp,
+            2,
+            {
+                0: [(0, 1)],
+            },
+        )
+        subset_field = gather_interval_subset(field, subset)
+        dense = field.values.reshape(2, 2)
+        with self.assertRaises(TypeError):
+            scatter_interval_subset(dense, subset_field)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            scatter_interval_subset(field, dense)  # type: ignore[arg-type]

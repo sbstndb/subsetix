@@ -75,6 +75,16 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(exporter_steps, [0, 1, 2])
         self.assertEqual(listener_steps, [0, 1, 2])
 
+    def test_set_initial_field_rejects_dense_array(self) -> None:
+        config = SimulationConfig(
+            coarse_resolution=8,
+            velocity=(0.0, 0.0),
+        )
+        sim = AMR2Simulation(config)
+        dense = cp.zeros((8, 8), dtype=cp.float32)
+        with self.assertRaises(TypeError):
+            sim.set_initial_field(dense)  # type: ignore[arg-type]
+
 
 if __name__ == "__main__":
     unittest.main()

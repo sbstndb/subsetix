@@ -52,6 +52,25 @@ class TwoLevelAPITest(unittest.TestCase):
         field.set_interval_fields(coarse=new_field)
         self.cp.testing.assert_array_equal(field.coarse_field.values, self.cp.full_like(new_field.values, 3.0))
 
+    def test_mesh_initialise_rejects_dense_refine(self) -> None:
+        mesh = TwoLevelMesh(Box((0.0, 0.0), (1.0, 1.0)), 0, 1, coarse_resolution=4)
+        dense_refine = self.cp.zeros((4, 4), dtype=self.cp.int8)
+        with self.assertRaises(TypeError):
+            mesh.initialise(refine=dense_refine)  # type: ignore[arg-type]
+
+    def test_mesh_regrid_rejects_dense_refine(self) -> None:
+        mesh = TwoLevelMesh(Box((0.0, 0.0), (1.0, 1.0)), 0, 1, coarse_resolution=4)
+        dense_refine = self.cp.zeros((4, 4), dtype=self.cp.int8)
+        with self.assertRaises(TypeError):
+            mesh.regrid(dense_refine)  # type: ignore[arg-type]
+
+    def test_set_interval_fields_rejects_dense_buffers(self) -> None:
+        mesh = TwoLevelMesh(Box((0.0, 0.0), (1.0, 1.0)), 0, 1, coarse_resolution=2)
+        field = make_scalar_field("u", mesh)
+        dense = self.cp.zeros_like(field.coarse_field.values)
+        with self.assertRaises(TypeError):
+            field.set_interval_fields(coarse=dense)  # type: ignore[arg-type]
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,8 +161,12 @@ class ScalarField:
         fine: IntervalField | None = None,
     ) -> None:
         if coarse is not None:
+            if not isinstance(coarse, IntervalField):
+                raise TypeError("coarse must be an IntervalField")
             self.coarse_field = coarse
         if fine is not None:
+            if not isinstance(fine, IntervalField):
+                raise TypeError("fine must be an IntervalField")
             self.fine_field = fine
 
     def resize(self) -> None:

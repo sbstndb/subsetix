@@ -83,10 +83,43 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(set(files.keys()), {"mesh_vtu"})
             for fname in files.values():
                 path = os.path.join(tmpdir, fname)
-                self.assertTrue(os.path.exists(path), f"missing {path}")
-                self.assertGreater(os.path.getsize(path), 0)
+            self.assertTrue(os.path.exists(path), f"missing {path}")
+            self.assertGreater(os.path.getsize(path), 0)
 
             mesh_path = os.path.join(tmpdir, files["mesh_vtu"])
             with open(mesh_path, "r", encoding="utf-8") as f:
                 content = f.read()
             self.assertIn("ghost_mask", content)
+
+    def test_save_two_level_vtk_rejects_dense_inputs(self) -> None:
+        cp = self.cp
+        refine_set = _make_interval_set(
+            cp,
+            2,
+            {
+                0: [(0, 2)],
+            },
+        )
+        actions = ActionField.full_grid(2, 2, ratio=2, default=Action.KEEP)
+        actions.set_from_interval_set(refine_set)
+        geom = TwoLevelGeometry.from_action_field(actions)
+        coarse_only_set = geom.coarse_only
+        fine_set = geom.fine
+        fine_field = _field_from_array(cp, cp.ones((4, 4), dtype=cp.float32))
+        dense_coarse = cp.ones((2, 2), dtype=cp.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(TypeError):
+                save_two_level_vtk(
+                    tmpdir,
+                    "demo",
+                    0,
+                    coarse_field=dense_coarse,  # type: ignore[arg-type]
+                    fine_field=fine_field,
+                    refine_set=refine_set,
+                    coarse_only_set=coarse_only_set,
+                    fine_set=fine_set,
+                    dx_coarse=1.0,
+                    dy_coarse=1.0,
+                    ratio=2,
+                )
