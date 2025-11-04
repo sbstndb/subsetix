@@ -278,8 +278,8 @@ def dilate_interval_set(
     """
     Dilate an interval set by extending every interval with a Manhattan halo.
 
-    The dilation is unbounded: callers that need domain clipping should intersect
-    the result with their target domain manually.
+    The dilation is unbounded; clip the result with whatever bounds you require
+    after the call.
     """
 
     if halo_x < 0 or halo_y < 0:

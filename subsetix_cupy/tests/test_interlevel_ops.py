@@ -169,6 +169,50 @@ class InterLevelOpsTest(unittest.TestCase):
             self.cp.asnumpy(level0.begin),
         )
 
+    def test_restrict_set_expands_partial_fine_block(self) -> None:
+        fine = build_interval_set(
+            row_offsets=[0, 1, 1, 2, 2],
+            begin=[1, 3],
+            end=[2, 4],
+        )
+        coarse = restrict_set(fine, ratio=2)
+        self.cp.testing.assert_array_equal(
+            coarse.row_offsets, self.cp.asarray([0, 1, 2], dtype=self.cp.int32)
+        )
+        self.cp.testing.assert_array_equal(
+            coarse.begin, self.cp.asarray([0, 1], dtype=self.cp.int32)
+        )
+        self.cp.testing.assert_array_equal(
+            coarse.end, self.cp.asarray([1, 2], dtype=self.cp.int32)
+        )
+
+    def test_prolong_set_expands_coarse_cell_to_full_fine_block(self) -> None:
+        coarse = build_interval_set(
+            row_offsets=[0, 1, 2],
+            begin=[1, 3],
+            end=[2, 4],
+        )
+        fine = prolong_set(coarse, ratio=2)
+        self.cp.testing.assert_array_equal(
+            fine.row_offsets, self.cp.asarray([0, 1, 2, 3, 4], dtype=self.cp.int32)
+        )
+        self.cp.testing.assert_array_equal(
+            fine.begin, self.cp.asarray([2, 2, 6, 6], dtype=self.cp.int32)
+        )
+        self.cp.testing.assert_array_equal(
+            fine.end, self.cp.asarray([4, 4, 8, 8], dtype=self.cp.int32)
+        )
+
+    def test_restrict_field_partial_block_raises(self) -> None:
+        fine = build_interval_set(
+            row_offsets=[0, 1, 1, 2, 2],
+            begin=[1, 3],
+            end=[2, 4],
+        )
+        fine_field = create_interval_field(fine, fill_value=1.0, dtype=self.cp.float32)
+        with self.assertRaises(ValueError):
+            restrict_field(fine_field, ratio=2, reducer="mean")
+
 
 if __name__ == "__main__":
     unittest.main()
