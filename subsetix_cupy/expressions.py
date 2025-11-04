@@ -11,69 +11,17 @@ and does not provide a CPU fallback path.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, List, Sequence, Tuple
-
-import importlib
-import sys
 
 import numpy as np
 
 
-def _load_actual_cupy() -> "object | None":
-    """Attempt to load the real CuPy module from site-packages."""
-    repo_root = Path(__file__).resolve().parents[1]
-    original_path = list(sys.path)
-    existing_module = sys.modules.pop("cupy", None)
-    try:
-        sys.path = [
-            entry
-            for entry in original_path
-            if entry
-            and not _is_subpath(entry, repo_root)
-        ]
-        try:
-            module = importlib.import_module("cupy")
-        except Exception:
-            return None
-        module_file = getattr(module, "__file__", "")
-        if module_file:
-            try:
-                if Path(module_file).resolve().is_relative_to(repo_root):
-                    return None
-            except (OSError, ValueError):
-                pass
-        try:
-            module.cuda.runtime.getDeviceCount()
-            module.cuda.runtime.runtimeGetVersion()
-        except Exception:
-            return None
-        return module
-    finally:
-        if existing_module is not None:
-            sys.modules["cupy"] = existing_module
-        else:
-            sys.modules.pop("cupy", None)
-        sys.path = original_path
-
-
-def _is_subpath(entry: str, root: Path) -> bool:
-    try:
-        resolved = Path(entry).resolve()
-    except OSError:
-        return False
-    try:
-        resolved.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-_REAL_CUPY = _load_actual_cupy()
-if _REAL_CUPY is None:
+try:
+    import cupy as _REAL_CUPY
+except ImportError as exc:
     raise RuntimeError(
         "CuPy backend with CUDA support is required; CPU fallback is disabled."
-    )
+    ) from exc
 
 
 def _require_cupy():
