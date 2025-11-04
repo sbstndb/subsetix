@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 from numbers import Integral
 
-from .expressions import IntervalSet, _require_cupy, evaluate, make_difference, make_input, make_intersection
+from .expressions import CuPyWorkspace, IntervalSet, _require_cupy, evaluate, make_difference, make_input, make_intersection
 from .kernels import get_kernels
 
 
@@ -117,6 +117,11 @@ def _build_interval_set_from_rows(rows, begin, end, *, rows_hint=None) -> Interv
     return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets, rows=rows_out.astype(cp.int32, copy=False))
 
 
+def _compact_interval_set(interval_set: IntervalSet) -> IntervalSet:
+    rows = interval_set.interval_rows()
+    return _build_interval_set_from_rows(rows, interval_set.begin, interval_set.end)
+
+
 def translate_interval_set(interval_set: IntervalSet, dx: int = 0, dy: int = 0) -> IntervalSet:
     """
     Translate an interval set by shifting every interval horizontally by ``dx`` and every row by ``dy``.
@@ -155,6 +160,74 @@ def translate_interval_set(interval_set: IntervalSet, dx: int = 0, dy: int = 0) 
     if rows_out.size == 0:
         rows_out = cp.zeros(0, dtype=cp.int32)
     return IntervalSet(begin=begin, end=end, row_offsets=row_offsets, rows=rows_out)
+
+
+def interior_for_direction(
+    interval_set: IntervalSet,
+    dx: int,
+    dy: int,
+    *,
+    workspace: CuPyWorkspace | None = None,
+) -> IntervalSet:
+    """
+    Return the subset of ``interval_set`` whose neighbour at offset ``(dx, dy)`` also belongs to the set.
+    """
+
+    if not isinstance(dx, Integral) or not isinstance(dy, Integral):
+        raise TypeError("dx and dy must be integers")
+    if dx == 0 and dy == 0:
+        raise ValueError("direction (dx, dy) must be non-zero")
+
+    neighbour = translate_interval_set(interval_set, dx=-int(dx), dy=-int(dy))
+    interior_expr = make_intersection(make_input(interval_set), make_input(neighbour))
+    interior = evaluate(interior_expr, workspace=workspace)
+    compact = _compact_interval_set(interior)
+    return _clone_interval_set(compact)
+
+
+def boundary_for_direction(
+    interval_set: IntervalSet,
+    dx: int,
+    dy: int,
+    *,
+    workspace: CuPyWorkspace | None = None,
+) -> IntervalSet:
+    """
+    Return the subset of ``interval_set`` lacking a neighbour at offset ``(dx, dy)``.
+    """
+
+    if not isinstance(dx, Integral) or not isinstance(dy, Integral):
+        raise TypeError("dx and dy must be integers")
+    if dx == 0 and dy == 0:
+        raise ValueError("direction (dx, dy) must be non-zero")
+
+    interior = interior_for_direction(interval_set, dx=dx, dy=dy, workspace=workspace)
+    boundary_expr = make_difference(make_input(interval_set), make_input(interior))
+    boundary = evaluate(boundary_expr, workspace=workspace)
+    compact = _compact_interval_set(boundary)
+    return _clone_interval_set(compact)
+
+
+def boundary_layer(
+    interval_set: IntervalSet,
+    *,
+    workspace: CuPyWorkspace | None = None,
+) -> IntervalSet:
+    """
+    Return the Von Neumann boundary of ``interval_set`` (cells missing at least one axial neighbour).
+    """
+
+    directions = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    interior = interval_set
+    for dx, dy in directions:
+        neighbour = translate_interval_set(interval_set, dx=-dx, dy=-dy)
+        interior_expr = make_intersection(make_input(interior), make_input(neighbour))
+        interior = evaluate(interior_expr, workspace=workspace)
+    interior_compact = _compact_interval_set(interior)
+    boundary_expr = make_difference(make_input(interval_set), make_input(interior_compact))
+    boundary = evaluate(boundary_expr, workspace=workspace)
+    compact = _compact_interval_set(boundary)
+    return _clone_interval_set(compact)
 
 
 def _dilate_interval_set_unbounded(
@@ -337,6 +410,9 @@ def erode_interval_set(
 
 __all__ = [
     "translate_interval_set",
+    "interior_for_direction",
+    "boundary_for_direction",
+    "boundary_layer",
     "dilate_interval_set",
     "ghost_zones",
     "erode_interval_set",

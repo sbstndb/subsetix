@@ -5,6 +5,12 @@ import numpy as np
 from subsetix_cupy import (
     build_interval_set,
     translate_interval_set,
+    interior_for_direction,
+    boundary_for_direction,
+    boundary_layer,
+    evaluate,
+    make_input,
+    make_union,
     dilate_interval_set,
     ghost_zones,
     erode_interval_set,
@@ -85,6 +91,69 @@ class MorphologyTest(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             translate_interval_set(base, dx=1.5)
+
+    def test_directional_interior_horizontal(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1],
+            begin=[0],
+            end=[4],
+        )
+        interior = interior_for_direction(base, dx=1, dy=0)
+        rows = _rows_to_python(interior, self.cp)
+        self.assertEqual(rows[0], [(0, 3)])
+        boundary = boundary_for_direction(base, dx=1, dy=0)
+        rows_boundary = _rows_to_python(boundary, self.cp)
+        self.assertEqual(rows_boundary[0], [(3, 4)])
+        layer = boundary_layer(base)
+        rows_layer = _rows_to_python(layer, self.cp)
+        self.assertEqual(rows_layer[0], [(0, 4)])
+
+    def test_directional_interior_vertical_sparse(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1, 2],
+            begin=[0, 0],
+            end=[3, 3],
+            rows=[2, 5],
+        )
+        interior = interior_for_direction(base, dx=0, dy=3)
+        row_ids = self.cp.asnumpy(interior.rows_index()).tolist()
+        self.assertEqual(row_ids, [2])
+        rows = _rows_to_python(interior, self.cp)
+        self.assertEqual(rows[0], [(0, 3)])
+        boundary = boundary_for_direction(base, dx=0, dy=3)
+        boundary_rows = _rows_to_python(boundary, self.cp)
+        self.assertEqual(boundary_rows[0], [(0, 3)])
+        self.assertEqual(self.cp.asnumpy(boundary.rows_index()).tolist(), [5])
+        layer = boundary_layer(base)
+        layer_rows = _rows_to_python(layer, self.cp)
+        self.assertEqual(layer_rows[0], [(0, 3)])
+        self.assertEqual(self.cp.asnumpy(layer.rows_index()).tolist(), [2, 5])
+
+    def test_direction_requires_non_zero(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1],
+            begin=[0],
+            end=[1],
+        )
+        with self.assertRaises(ValueError):
+            interior_for_direction(base, dx=0, dy=0)
+        with self.assertRaises(ValueError):
+            boundary_for_direction(base, dx=0, dy=0)
+
+    def test_boundary_layer_matches_union(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 2],
+            begin=[0, 2],
+            end=[1, 3],
+        )
+        left = boundary_for_direction(base, dx=-1, dy=0)
+        right = boundary_for_direction(base, dx=1, dy=0)
+        layer = boundary_layer(base)
+        union_expr = make_union(make_input(left), make_input(right))
+        union = evaluate(union_expr)
+        layer_rows = _rows_to_python(layer, self.cp)
+        union_rows = _rows_to_python(union, self.cp)
+        self.assertEqual(layer_rows, union_rows)
 
     def test_dilate_adds_vertical_neighbors(self) -> None:
         base = build_interval_set(

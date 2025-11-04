@@ -30,6 +30,9 @@ from .multilevel import (
 )
 from .morphology import (
     translate_interval_set,
+    interior_for_direction,
+    boundary_for_direction,
+    boundary_layer,
     dilate_interval_set,
     erode_interval_set,
     full_interval_set,
@@ -71,6 +74,9 @@ __all__ = [
     "covered_by_fine",
     "coarse_only",
     "translate_interval_set",
+    "interior_for_direction",
+    "boundary_for_direction",
+    "boundary_layer",
     "dilate_interval_set",
     "erode_interval_set",
     "ghost_zones",
