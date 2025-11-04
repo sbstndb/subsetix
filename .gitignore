@@ -43,3 +43,12 @@ Thumbs.db
 ## Demo artifacts
 out_vtk/
 .pytest_cache/
+
+## Profiling artifacts
+.coverage
+*.nsys-rep
+nsys_*.sqlite
+report*.sqlite
+nsys_profiles*/
+*cuda_api_sum.csv
+*cuda_gpu_mem_size_sum.csv
