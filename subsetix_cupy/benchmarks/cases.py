@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
+
+import cupy as cp
 
 from .. import (
     IntervalField,
@@ -19,7 +21,6 @@ from .. import (
     restrict_level_field,
     restrict_level_sets,
     restrict_set,
-    interval_field_to_dense,
     step_upwind_interval,
 )
 from ..morphology import dilate_interval_set, erode_interval_set, ghost_zones, clip_interval_set
@@ -37,39 +38,6 @@ from .utils import (
 SMALL_SPEC = GeometrySpec(rows=256, width=256, tiles_x=3, tiles_y=3, fill_ratio=0.8)
 LARGE_SPEC = GeometrySpec(rows=8192, width=8192, tiles_x=3, tiles_y=3, fill_ratio=0.8)
 RATIO = 2
-
-
-def _dense_upwind_zero(
-    field: Any,
-    *,
-    a: float,
-    b: float,
-    dt: float,
-    dx: float,
-    dy: float,
-    out: cp.ndarray | None = None,
-) -> cp.ndarray:
-    cp = _require_cupy()
-    base = cp.asarray(field, dtype=cp.float32, copy=False)
-    padded = cp.pad(base, ((1, 1), (1, 1)), mode="constant")
-    center = padded[1:-1, 1:-1]
-    left = padded[1:-1, :-2]
-    right = padded[1:-1, 2:]
-    down = padded[:-2, 1:-1]
-    up = padded[2:, 1:-1]
-    if a >= 0.0:
-        du_dx = (center - left) / dx
-    else:
-        du_dx = (right - center) / dx
-    if b >= 0.0:
-        du_dy = (center - down) / dy
-    else:
-        du_dy = (up - center) / dy
-    result = center - dt * (a * du_dx + b * du_dy)
-    if out is not None:
-        out[...] = result
-        return out
-    return result
 STENCIL_SMALL = GeometrySpec(rows=512, width=512, tiles_x=1, tiles_y=1, fill_ratio=0.65)
 STENCIL_LARGE = GeometrySpec(rows=2048, width=2048, tiles_x=1, tiles_y=1, fill_ratio=0.65)
 
@@ -267,7 +235,6 @@ def _build_stencil_case(
     name: str,
     description: str,
     spec: GeometrySpec,
-    mode: str,
     variant: str,
 ) -> BenchmarkCase:
     cp = _require_cupy()
@@ -280,7 +247,6 @@ def _build_stencil_case(
     else:
         raise ValueError(f"unsupported stencil variant '{variant}'")
     field = deterministic_interval_field(cp, interval_set, width=spec.width)
-    dense = interval_field_to_dense(field, width=spec.width, height=spec.rows, fill_value=0.0)
     row_ids = interval_set.interval_rows().astype(cp.int32, copy=False)
 
     a = 0.35
@@ -289,80 +255,12 @@ def _build_stencil_case(
     dx = 1.0 / max(1, spec.width)
     dy = 1.0 / max(1, spec.rows)
 
-    dense_ref = _dense_upwind_zero(dense, a=a, b=b, dt=dt, dx=dx, dy=dy)
-    interval_ref = cp.empty_like(field.values)
-    step_upwind_interval(
-        field,
-        width=spec.width,
-        height=spec.rows,
-        a=a,
-        b=b,
-        dt=dt,
-        dx=dx,
-        dy=dy,
-        out=interval_ref,
-        row_ids=row_ids,
-    )
-
-    ref_field = IntervalField(
-        interval_set=field.interval_set,
-        values=interval_ref,
-        interval_cell_offsets=field.interval_cell_offsets,
-    )
-    dense_from_interval = interval_field_to_dense(
-        ref_field,
-        width=spec.width,
-        height=spec.rows,
-        fill_value=0.0,
-    )
-
-    mask = cp.zeros((spec.rows, spec.width), dtype=cp.bool_)
-    row_offsets_host = interval_set.row_offsets.get()
-    begin_host = interval_set.begin.get()
-    end_host = interval_set.end.get()
-    for row in range(spec.rows):
-        start = row_offsets_host[row]
-        stop = row_offsets_host[row + 1]
-        for idx in range(start, stop):
-            b_idx = int(begin_host[idx])
-            e_idx = int(end_host[idx])
-            mask[row, b_idx:e_idx] = True
-
-    cp.testing.assert_allclose(
-        dense_ref[mask],
-        dense_from_interval[mask],
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-    dense_scratch = cp.empty_like(dense)
     interval_scratch = cp.empty_like(field.values)
 
     active_cells = int(field.interval_cell_offsets[-1].item()) if field.interval_cell_offsets.size else 0
 
-    if mode == "dense":
-        func = lambda: _dense_upwind_zero(
-            dense,
-            a=a,
-            b=b,
-            dt=dt,
-            dx=dx,
-            dy=dy,
-            out=dense_scratch,
-        )
-        metadata = {
-            "entity": "Dense2D",
-            "rows": spec.rows,
-            "width": spec.width,
-            "active_cells": active_cells,
-            "a": a,
-            "b": b,
-            "dt": dt,
-            "boundary": "zero_exterior",
-        }
-        input_count = active_cells
-    elif mode == "interval":
-        func = lambda: step_upwind_interval(
+    def _interval_target():
+        return step_upwind_interval(
             field,
             width=spec.width,
             height=spec.rows,
@@ -374,28 +272,30 @@ def _build_stencil_case(
             out=interval_scratch,
             row_ids=row_ids,
         )
-        metadata = {
-            "entity": "IntervalField",
-            "rows": spec.rows,
-            "width": spec.width,
-            "active_cells": active_cells,
-            "a": a,
-            "b": b,
-            "dt": dt,
-            "boundary": "zero_exterior",
-        }
-        input_count = active_cells
-    else:
-        raise ValueError(f"unsupported stencil mode '{mode}'")
 
-    metadata["mode"] = mode
-    metadata["variant"] = variant
-    metadata["input_intervals"] = input_count
+    for _ in range(3):
+        _interval_target()
+    cp.cuda.runtime.deviceSynchronize()
+
+    metadata = {
+        "entity": "IntervalField",
+        "rows": spec.rows,
+        "width": spec.width,
+        "active_cells": active_cells,
+        "a": a,
+        "b": b,
+        "dt": dt,
+        "dx": dx,
+        "dy": dy,
+        "boundary": "zero_exterior",
+        "variant": variant,
+        "input_intervals": active_cells,
+    }
 
     return BenchmarkCase(
         name=name,
         description=description,
-        setup=lambda _cp: BenchmarkTarget(func=func, repeat=40, warmup=5, metadata=metadata),
+        setup=lambda _cp: BenchmarkTarget(func=_interval_target, repeat=40, warmup=5, metadata=metadata),
     )
 
 
@@ -557,59 +457,27 @@ _CASES: List[BenchmarkCase] = [
         op="coarse_only",
     ),
     _build_stencil_case(
-        name="stencil_dense_square_small",
-        description="Dense upwind stencil (zero exterior, square mask, small domain)",
-        spec=STENCIL_SMALL,
-        mode="dense",
-        variant="square",
-    ),
-    _build_stencil_case(
         name="stencil_interval_square_small",
         description="Interval-field upwind stencil (square mask, small domain)",
         spec=STENCIL_SMALL,
-        mode="interval",
-        variant="square",
-    ),
-    _build_stencil_case(
-        name="stencil_dense_square_large",
-        description="Dense upwind stencil (zero exterior, square mask, large domain)",
-        spec=STENCIL_LARGE,
-        mode="dense",
         variant="square",
     ),
     _build_stencil_case(
         name="stencil_interval_square_large",
         description="Interval-field upwind stencil (square mask, large domain)",
         spec=STENCIL_LARGE,
-        mode="interval",
         variant="square",
-    ),
-    _build_stencil_case(
-        name="stencil_dense_stair_small",
-        description="Dense upwind stencil (zero exterior, staircase mask, small domain)",
-        spec=STENCIL_SMALL,
-        mode="dense",
-        variant="staircase",
     ),
     _build_stencil_case(
         name="stencil_interval_stair_small",
         description="Interval-field upwind stencil (staircase mask, small domain)",
         spec=STENCIL_SMALL,
-        mode="interval",
-        variant="staircase",
-    ),
-    _build_stencil_case(
-        name="stencil_dense_stair_large",
-        description="Dense upwind stencil (zero exterior, staircase mask, large domain)",
-        spec=STENCIL_LARGE,
-        mode="dense",
         variant="staircase",
     ),
     _build_stencil_case(
         name="stencil_interval_stair_large",
         description="Interval-field upwind stencil (staircase mask, large domain)",
         spec=STENCIL_LARGE,
-        mode="interval",
         variant="staircase",
     ),
 ]

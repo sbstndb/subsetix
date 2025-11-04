@@ -48,8 +48,6 @@ def run_benchmark(size: int, ratio: int, iterations: int, seed: int | None, copy
     if seed is not None:
         cp.random.seed(seed)
 
-    coarse = cp.random.random((size, size), dtype=cp.float32)
-    fine = cp.random.random((size * ratio, size * ratio), dtype=cp.float32)
     refine = _central_refine(cp, size, size)
 
     actions = ActionField.full_grid(size, size, ratio)
@@ -59,8 +57,8 @@ def run_benchmark(size: int, ratio: int, iterations: int, seed: int | None, copy
     fine_interval = full_interval_set(size * ratio, size * ratio)
     coarse_field_base = create_interval_field(coarse_interval, fill_value=0.0, dtype=cp.float32)
     fine_field_base = create_interval_field(fine_interval, fill_value=0.0, dtype=cp.float32)
-    coarse_field_base.values[...] = coarse.ravel()
-    fine_field_base.values[...] = fine.ravel()
+    coarse_field_base.values[...] = cp.random.random(coarse_field_base.values.shape, dtype=cp.float32)
+    fine_field_base.values[...] = cp.random.random(fine_field_base.values.shape, dtype=cp.float32)
 
     def call():
         if copy:

@@ -9,7 +9,7 @@ modify individual cells without expanding to a dense grid.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 from .expressions import IntervalSet, _require_cupy
 
@@ -85,114 +85,6 @@ def create_interval_field(
         values=values,
         interval_cell_offsets=cell_offsets,
     )
-
-
-_SCATTER_KERNEL_CACHE: Dict[str, Any] = {}
-
-
-def _get_scatter_kernel(dtype: Any):
-    cp = _require_cupy()
-    key = cp.dtype(dtype).str
-    kernel = _SCATTER_KERNEL_CACHE.get(key)
-    if kernel is not None:
-        return kernel
-    if dtype == cp.float32:
-        type_name = "float"
-    elif dtype == cp.float64:
-        type_name = "double"
-    elif dtype == cp.int32:
-        type_name = "int"
-    elif dtype == cp.int64:
-        type_name = "long long"
-    else:
-        raise TypeError(f"unsupported dtype {dtype} for interval_field_to_dense")
-    code = f"""
-    extern "C" __global__
-    void scatter_interval_field(const int* __restrict__ row_ids,
-                                const int* __restrict__ begin,
-                                const int* __restrict__ end,
-                                const int* __restrict__ cell_offsets,
-                                const {type_name}* __restrict__ values,
-                                {type_name}* __restrict__ out,
-                                int width)
-    {{
-        int interval = blockIdx.x;
-        int row = row_ids[interval];
-        int start = begin[interval];
-        int stop = end[interval];
-        if (stop <= start) {{
-            return;
-        }}
-        int base = cell_offsets[interval];
-        int length = cell_offsets[interval + 1] - base;
-        int row_offset = row * width;
-        for (int idx = threadIdx.x; idx < length; idx += blockDim.x) {{
-            out[row_offset + start + idx] = values[base + idx];
-        }}
-    }}
-    """
-    kernel = cp.RawKernel(code, "scatter_interval_field", options=("--std=c++11",))
-    _SCATTER_KERNEL_CACHE[key] = kernel
-    return kernel
-
-
-def interval_field_to_dense(
-    field: IntervalField,
-    *,
-    width: int,
-    height: int,
-    fill_value: float = 0.0,
-    out: Any | None = None,
-):
-    """
-    Materialise an IntervalField into a dense 2D array of shape (height, width).
-    """
-
-    cp = _require_cupy()
-    width = int(width)
-    height = int(height)
-    if width <= 0 or height <= 0:
-        raise ValueError("width and height must be positive")
-
-    interval_set = field.interval_set
-    begin = cp.asarray(interval_set.begin, dtype=cp.int32)
-    end = cp.asarray(interval_set.end, dtype=cp.int32)
-    cell_offsets = cp.asarray(field.interval_cell_offsets, dtype=cp.int32)
-    values = cp.asarray(field.values, dtype=field.values.dtype)
-
-    interval_count = int(begin.size)
-    if cell_offsets.size != interval_count + 1:
-        raise ValueError("interval_cell_offsets length mismatch")
-
-    if out is None:
-        out = cp.full((height, width), fill_value, dtype=values.dtype)
-    else:
-        if out.shape != (height, width):
-            raise ValueError("out must have shape (height, width)")
-        if out.dtype != values.dtype:
-            raise TypeError("out dtype must match field values dtype")
-        out.fill(values.dtype.type(fill_value))
-
-    if interval_count == 0:
-        return out
-
-    row_ids = interval_set.interval_rows().astype(cp.int32, copy=False)
-    if row_ids.size:
-        max_row = int(row_ids.max().item())
-        if max_row >= height:
-            raise ValueError("height must exceed the largest active row index")
-    if row_ids.size != interval_count:
-        raise ValueError("rows/interval mismatch")
-
-    kernel = _get_scatter_kernel(values.dtype)
-    block = 128
-    grid = (interval_count,)
-    kernel(
-        grid,
-        (block,),
-        (row_ids, begin, end, cell_offsets, values, out, cp.int32(width)),
-    )
-    return out
 
 
 def _locate_interval(interval_set: IntervalSet, row: int, x: int) -> int | None:

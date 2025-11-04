@@ -88,16 +88,15 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
     if seed is not None:
         cp.random.seed(seed)
 
-    coarse = cp.random.random((size, size), dtype=cp.float32)
-    fine = cp.random.random((size * ratio, size * ratio), dtype=cp.float32)
-
     coarse_interval = full_interval_set(size, size)
     coarse_field = create_interval_field(coarse_interval, fill_value=0.0, dtype=cp.float32)
-    coarse_field.values[...] = coarse.ravel()
+    coarse_field.values[...] = cp.random.random(coarse_field.values.shape, dtype=cp.float32)
+    coarse_view = coarse_field.values.reshape(size, size)
 
     fine_interval = full_interval_set(size * ratio, size * ratio)
     fine_field = create_interval_field(fine_interval, fill_value=0.0, dtype=cp.float32)
-    fine_field.values[...] = fine.ravel()
+    fine_field.values[...] = cp.random.random(fine_field.values.shape, dtype=cp.float32)
+    fine_view = fine_field.values.reshape(size * ratio, size * ratio)
     coarse_out = cp.empty_like(coarse_field.values)
     fine_out = cp.empty_like(fine_field.values)
 
@@ -123,7 +122,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
             dy=dy_coarse,
             out=coarse_out,
         )
-        _run_kernel(kernel, coarse, a, b, dt, dx_coarse, dy_coarse)
+        _run_kernel(kernel, coarse_view, a, b, dt, dx_coarse, dy_coarse)
     for _ in range(3):
         step_upwind_interval(
             fine_field,
@@ -136,7 +135,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
             dy=dy_fine,
             out=fine_out,
         )
-        _run_kernel(kernel, fine, a, b, dt, dx_fine, dy_fine)
+        _run_kernel(kernel, fine_view, a, b, dt, dx_fine, dy_fine)
     cp.cuda.runtime.deviceSynchronize()
 
     def time_call(fn):
@@ -171,7 +170,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
         )
         ref_times.append(t_ref)
         _, t_ker = time_call(
-            lambda: _run_kernel(kernel, coarse, a, b, dt, dx_coarse, dy_coarse)
+            lambda: _run_kernel(kernel, coarse_view, a, b, dt, dx_coarse, dy_coarse)
         )
         ker_times.append(t_ker)
 
@@ -195,7 +194,7 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
         )
         ref_times.append(t_ref)
         _, t_ker = time_call(
-            lambda: _run_kernel(kernel, fine, a, b, dt, dx_fine, dy_fine)
+            lambda: _run_kernel(kernel, fine_view, a, b, dt, dx_fine, dy_fine)
         )
         ker_times.append(t_ker)
 

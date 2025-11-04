@@ -6,12 +6,11 @@ from subsetix_amr2.fields import (
     synchronize_interval_fields,
     gather_interval_subset,
     scatter_interval_subset,
-    clone_interval_field,
 )
 from subsetix_cupy.expressions import IntervalSet, _REAL_CUPY
 from subsetix_cupy.morphology import full_interval_set
-from subsetix_cupy import create_interval_field, interval_field_to_dense
-from subsetix_cupy.interval_field import IntervalField
+from subsetix_cupy import create_interval_field
+from subsetix_cupy.interval_field import IntervalField, get_cell
 
 
 def _make_interval_set(cp_mod, height, spans):
@@ -35,12 +34,23 @@ class FieldsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.cp = _REAL_CUPY
 
-    def _full_field(self, array: "cp.ndarray") -> IntervalField:
-        height, width = array.shape
+    def _full_field(
+        self,
+        height: int,
+        width: int,
+        *,
+        fill_value: float = 0.0,
+        dtype=None,
+    ) -> IntervalField:
+        dtype = dtype or self.cp.float32
         full = full_interval_set(width, height)
-        field = create_interval_field(full, fill_value=0.0, dtype=array.dtype)
-        field.values[...] = array.astype(array.dtype, copy=False).ravel()
-        return field
+        return create_interval_field(full, fill_value=fill_value, dtype=dtype)
+
+    def _cell_value(self, field: IntervalField, row: int, col: int) -> float | None:
+        value = get_cell(field, row, col)
+        if value is None:
+            return None
+        return float(value.item())
 
     def test_action_field_from_interval_set(self) -> None:
         width = 4
@@ -56,8 +66,7 @@ class FieldsTest(unittest.TestCase):
         self.cp.testing.assert_array_equal(grid, expected)
 
     def test_synchronize_interval_fields_copy_and_fill(self) -> None:
-        coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
-        fine = self.cp.full((8, 8), 2.0, dtype=self.cp.float32)
+        dtype = self.cp.float32
         refine = _make_interval_set(
             self.cp,
             4,
@@ -70,8 +79,10 @@ class FieldsTest(unittest.TestCase):
         actions = ActionField.full_grid(4, 4, ratio=2)
         actions.set_from_interval_set(refine)
 
-        coarse_field = self._full_field(coarse)
-        fine_field = self._full_field(fine)
+        coarse_field = self._full_field(height=4, width=4, dtype=dtype)
+        fine_field = self._full_field(height=8, width=8, dtype=dtype, fill_value=2.0)
+        coarse_initial = coarse_field.values.copy()
+        fine_initial = fine_field.values.copy()
 
         coarse_sync, fine_sync = synchronize_interval_fields(
             coarse_field,
@@ -83,24 +94,28 @@ class FieldsTest(unittest.TestCase):
             copy=True,
         )
 
-        coarse_dense = interval_field_to_dense(coarse_sync, width=4, height=4, fill_value=0.0)
-        fine_dense = interval_field_to_dense(fine_sync, width=8, height=8, fill_value=0.0)
+        active_coarse = {(1, 1), (1, 2), (2, 1), (2, 2)}
+        for row in range(4):
+            for col in range(4):
+                value = self._cell_value(coarse_sync, row, col)
+                self.assertIsNotNone(value)
+                expected = 2.0 if (row, col) in active_coarse else 0.0
+                self.assertEqual(value, expected)
 
-        expected_coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
-        expected_coarse[1:3, 1:3] = 2.0
-        self.cp.testing.assert_array_equal(coarse_dense, expected_coarse)
-
-        expected_fine = self.cp.zeros((8, 8), dtype=self.cp.float32)
-        expected_fine[2:6, 2:6] = 2.0
-        self.cp.testing.assert_array_equal(fine_dense, expected_fine)
+        active_fine = {(row, col) for row in range(2, 6) for col in range(2, 6)}
+        for row in range(8):
+            for col in range(8):
+                value = self._cell_value(fine_sync, row, col)
+                self.assertIsNotNone(value)
+                expected = 2.0 if (row, col) in active_fine else 0.0
+                self.assertEqual(value, expected)
 
         # original buffers untouched in copy=True mode
-        self.cp.testing.assert_array_equal(interval_field_to_dense(coarse_field, width=4, height=4, fill_value=0.0), coarse)
-        self.cp.testing.assert_array_equal(interval_field_to_dense(fine_field, width=8, height=8, fill_value=0.0), fine)
+        self.cp.testing.assert_array_equal(coarse_field.values, coarse_initial)
+        self.cp.testing.assert_array_equal(fine_field.values, fine_initial)
 
     def test_synchronize_interval_fields_inplace_and_no_fill(self) -> None:
-        coarse = self.cp.zeros((2, 2), dtype=self.cp.float32)
-        fine = self.cp.arange(16, dtype=self.cp.float32).reshape(4, 4)
+        dtype = self.cp.float32
         refine = _make_interval_set(
             self.cp,
             2,
@@ -113,8 +128,10 @@ class FieldsTest(unittest.TestCase):
         actions = ActionField.full_grid(2, 2, ratio=2)
         actions.set_from_interval_set(refine)
 
-        coarse_field = self._full_field(coarse)
-        fine_field = self._full_field(fine)
+        coarse_field = self._full_field(height=2, width=2, dtype=dtype)
+        fine_field = self._full_field(height=4, width=4, dtype=dtype)
+        fine_field.values[...] = self.cp.arange(fine_field.values.size, dtype=dtype)
+        fine_initial = fine_field.values.copy()
 
         coarse_res, fine_res = synchronize_interval_fields(
             coarse_field,
@@ -129,25 +146,54 @@ class FieldsTest(unittest.TestCase):
         self.assertIs(coarse_res, coarse_field)
         self.assertIs(fine_res, fine_field)
 
-        coarse_dense = interval_field_to_dense(coarse_res, width=2, height=2, fill_value=0.0)
-        expected_coarse = self.cp.zeros((2, 2), dtype=self.cp.float32)
-        expected_coarse[0, 0] = fine[0:2, 0:2].mean()
-        expected_coarse[1, 0] = fine[2:4, 0:2].mean()
-        self.cp.testing.assert_allclose(coarse_dense, expected_coarse)
+        ratio = 2
+        width = 2
+        fine_width = width * ratio
+        expected_flat = self.cp.zeros_like(coarse_res.values)
+        refine_offsets = self.cp.asnumpy(refine.row_offsets)
+        refine_begin = self.cp.asnumpy(refine.begin)
+        refine_end = self.cp.asnumpy(refine.end)
+        for coarse_row in range(len(refine_offsets) - 1):
+            start = refine_offsets[coarse_row]
+            stop = refine_offsets[coarse_row + 1]
+            for idx in range(start, stop):
+                col_start = refine_begin[idx]
+                col_end = refine_end[idx]
+                for coarse_col in range(col_start, col_end):
+                    indices = []
+                    for dy in range(ratio):
+                        fine_row = coarse_row * ratio + dy
+                        for dx in range(ratio):
+                            fine_col = coarse_col * ratio + dx
+                            indices.append(fine_row * fine_width + fine_col)
+                    if not indices:
+                        continue
+                    indices_cp = self.cp.asarray(indices, dtype=self.cp.int32)
+                    mean_value = self.cp.mean(fine_initial[indices_cp])
+                    index = coarse_row * width + coarse_col
+                    expected_flat[index] = mean_value
 
-        fine_dense = interval_field_to_dense(fine_res, width=4, height=4, fill_value=0.0)
-        self.cp.testing.assert_array_equal(fine_dense, fine)
+        # fine values unchanged in-place without fill
+        self.cp.testing.assert_array_equal(fine_res.values, fine_initial)
+        self.cp.testing.assert_allclose(coarse_res.values, expected_flat)
+        for row in range(2):
+            for col in range(2):
+                value = self._cell_value(coarse_res, row, col)
+                self.assertIsNotNone(value)
+                expected = float(expected_flat[row * width + col].item())
+                self.assertAlmostEqual(value, expected)
 
     def test_synchronize_interval_fields_invalid_ratio(self) -> None:
-        coarse = self._full_field(self.cp.zeros((2, 2), dtype=self.cp.float32))
-        fine = self._full_field(self.cp.zeros((4, 4), dtype=self.cp.float32))
+        coarse = self._full_field(height=2, width=2, dtype=self.cp.float32)
+        fine = self._full_field(height=4, width=4, dtype=self.cp.float32)
         actions = ActionField.full_grid(2, 2, ratio=2)
         with self.assertRaises(ValueError):
             synchronize_interval_fields(coarse, fine, actions, ratio=3)
 
     def test_gather_scatter_interval_subset(self) -> None:
-        data = self.cp.arange(12, dtype=self.cp.float32).reshape(3, 4)
-        field = self._full_field(data)
+        dtype = self.cp.float32
+        field = self._full_field(height=3, width=4, dtype=dtype)
+        field.values[...] = self.cp.arange(field.values.size, dtype=dtype)
         subset = _make_interval_set(
             self.cp,
             3,
@@ -157,18 +203,30 @@ class FieldsTest(unittest.TestCase):
             },
         )
         subset_field = gather_interval_subset(field, subset)
-        subset_dense = interval_field_to_dense(subset_field, width=4, height=3, fill_value=0.0)
-        expected = self.cp.zeros_like(data)
-        expected[0, 1:3] = data[0, 1:3]
-        expected[2, 0:2] = data[2, 0:2]
-        self.cp.testing.assert_array_equal(subset_dense, expected)
+        self.assertEqual(subset_field.values.size, 4)
 
-        clone = clone_interval_field(field)
-        clone.values.fill(0.0)
-        original_dense = interval_field_to_dense(field, width=4, height=3, fill_value=0.0)
-        self.cp.testing.assert_array_equal(original_dense, data)
+        expected_subset = {
+            (0, 1): 1.0,
+            (0, 2): 2.0,
+            (2, 0): 8.0,
+            (2, 1): 9.0,
+        }
+        for row in range(3):
+            for col in range(4):
+                value = self._cell_value(subset_field, row, col)
+                if (row, col) in expected_subset:
+                    self.assertEqual(value, expected_subset[(row, col)])
+                else:
+                    self.assertIsNone(value)
 
-        target = self._full_field(self.cp.zeros_like(data))
+        self.cp.testing.assert_array_equal(field.values, self.cp.arange(field.values.size, dtype=dtype))
+
+        target = self._full_field(height=3, width=4, dtype=dtype)
         scatter_interval_subset(target, subset_field)
-        target_dense = interval_field_to_dense(target, width=4, height=3, fill_value=0.0)
-        self.cp.testing.assert_array_equal(target_dense, expected)
+        for row in range(3):
+            for col in range(4):
+                value = self._cell_value(target, row, col)
+                if (row, col) in expected_subset:
+                    self.assertEqual(value, expected_subset[(row, col)])
+                else:
+                    self.assertEqual(value, 0.0)

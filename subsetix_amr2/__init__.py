@@ -6,7 +6,7 @@ geometries and common refinement utilities while reusing the interval
 set operations implemented in :mod:`subsetix_cupy`.
 """
 
-from .geometry import TwoLevelGeometry, mask_to_interval_set, interval_set_to_mask
+from .geometry import TwoLevelGeometry
 from .regrid import (
     gradient_tag_threshold_set,
     gradient_tag_set,
@@ -36,8 +36,6 @@ from .simulation import (
 
 __all__ = [
     "TwoLevelGeometry",
-    "mask_to_interval_set",
-    "interval_set_to_mask",
     "gradient_tag_set",
     "gradient_tag_threshold_set",
     "enforce_two_level_grading_set",
