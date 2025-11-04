@@ -294,6 +294,15 @@ class IntervalSet:
         row_indices = cp.searchsorted(row_offsets[1:], positions, side="right")
         return rows[row_indices]
 
+    def copy(self) -> "IntervalSet":
+        cp = _require_cupy()
+        return IntervalSet(
+            begin=cp.array(self.begin, dtype=cp.int32, copy=True),
+            end=cp.array(self.end, dtype=cp.int32, copy=True),
+            row_offsets=cp.array(self.row_offsets, dtype=cp.int32, copy=True),
+            rows=cp.array(self.rows, dtype=cp.int32, copy=True),
+        )
+
 
 class CuPyWorkspace:
     """

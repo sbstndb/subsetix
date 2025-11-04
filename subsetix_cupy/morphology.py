@@ -14,16 +14,6 @@ from .expressions import CuPyWorkspace, IntervalSet, _require_cupy, evaluate, ma
 from .kernels import get_kernels
 
 
-def _clone_interval_set(interval_set: IntervalSet) -> IntervalSet:
-    cp = _require_cupy()
-    return IntervalSet(
-        begin=cp.array(interval_set.begin, dtype=cp.int32, copy=True),
-        end=cp.array(interval_set.end, dtype=cp.int32, copy=True),
-        row_offsets=cp.array(interval_set.row_offsets, dtype=cp.int32, copy=True),
-        rows=cp.array(interval_set.rows, dtype=cp.int32, copy=True),
-    )
-
-
 def _row_ids(interval_set: IntervalSet) -> "object":
     return interval_set.interval_rows()
 
@@ -133,7 +123,7 @@ def translate_interval_set(interval_set: IntervalSet, dx: int = 0, dy: int = 0) 
     dx_int = int(dx)
     dy_int = int(dy)
     if dx_int == 0 and dy_int == 0:
-        return _clone_interval_set(interval_set)
+        return interval_set.copy()
 
     cp = _require_cupy()
     begin = cp.array(interval_set.begin, dtype=cp.int32, copy=True)
@@ -170,7 +160,7 @@ def interior_for_direction(
     interior_expr = make_intersection(make_input(interval_set), make_input(neighbour))
     interior = evaluate(interior_expr, workspace=workspace)
     compact = _compact_interval_set(interior)
-    return _clone_interval_set(compact)
+    return compact.copy()
 
 
 def boundary_for_direction(
@@ -193,7 +183,7 @@ def boundary_for_direction(
     boundary_expr = make_difference(make_input(interval_set), make_input(interior))
     boundary = evaluate(boundary_expr, workspace=workspace)
     compact = _compact_interval_set(boundary)
-    return _clone_interval_set(compact)
+    return compact.copy()
 
 
 def boundary_layer(
@@ -215,7 +205,7 @@ def boundary_layer(
     boundary_expr = make_difference(make_input(interval_set), make_input(interior_compact))
     boundary = evaluate(boundary_expr, workspace=workspace)
     compact = _compact_interval_set(boundary)
-    return _clone_interval_set(compact)
+    return compact.copy()
 
 
 def _dilate_interval_set_unbounded(
@@ -226,7 +216,7 @@ def _dilate_interval_set_unbounded(
 ) -> IntervalSet:
     cp = _require_cupy()
     if halo_x == 0 and halo_y == 0:
-        return _clone_interval_set(interval_set)
+        return interval_set.copy()
 
     begin = interval_set.begin.astype(cp.int32, copy=True)
     end = interval_set.end.astype(cp.int32, copy=True)
@@ -246,7 +236,7 @@ def _dilate_interval_set_unbounded(
     if halo_y == 0:
         rows_hint = interval_set.rows_index()
         dilated = _build_interval_set_from_rows(rows_per_interval, begin, end, rows_hint=rows_hint)
-        return _clone_interval_set(dilated)
+        return dilated.copy()
 
     shifts = cp.arange(-halo_y, halo_y + 1, dtype=cp.int32)
     rows_all = rows_per_interval[:, None] + shifts[None, :]
@@ -255,7 +245,7 @@ def _dilate_interval_set_unbounded(
     end_all = cp.repeat(end, shifts.size)
 
     dilated = _build_interval_set_from_rows(rows_all, begin_all, end_all)
-    return _clone_interval_set(dilated)
+    return dilated.copy()
 
 
 def dilate_interval_set(
@@ -348,7 +338,7 @@ def ghost_zones(
     base = clip_interval_set(interval_set, width=width, height=height)
     ghost_expr = make_difference(make_input(clipped), make_input(base))
     ghost = evaluate(ghost_expr)
-    return _clone_interval_set(ghost)
+    return ghost.copy()
 
 
 def full_interval_set(width: int, height: int) -> IntervalSet:
@@ -393,7 +383,7 @@ def erode_interval_set(
     dilated_clipped = clip_interval_set(dilated_complement, width=width, height=height)
     eroded_expr = make_difference(make_input(universe), make_input(dilated_clipped))
     eroded = evaluate(eroded_expr)
-    return _clone_interval_set(eroded)
+    return eroded.copy()
 
 
 __all__ = [
