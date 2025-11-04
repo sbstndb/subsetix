@@ -14,6 +14,7 @@ from subsetix_cupy.expressions import (
     evaluate,
     make_difference,
     make_input,
+    make_intersection,
 )
 from subsetix_cupy import prolong_set
 from subsetix_cupy.multilevel import prolong_field, restrict_field
@@ -34,134 +35,85 @@ _PROLONG_NEAREST_KERNEL = cp.ElementwiseKernel(
 )
 
 _COPY_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
-_FILL_KERNEL_CACHE: Dict[str, cp.RawKernel] = {}
 _SUBSET_KERNEL_CACHE: Dict[tuple[str, str], cp.RawKernel] = {}
 _FULL_CELL_OFFSET_CACHE: Dict[tuple[int, int], cp.ndarray] = {}
-
-_ACTION_COUNT_KERNEL = cp.RawKernel(
-    r"""
-    extern "C" __global__
-    void subsetix_count_value_intervals(const signed char* __restrict__ data,
-                                        int rows,
-                                        int width,
-                                        signed char target,
-                                        int* __restrict__ counts)
-    {
-        int row = blockIdx.x;
-        if (row >= rows) {
-            return;
-        }
-        const signed char* row_ptr = data + row * width;
-        bool inside = false;
-        int count = 0;
-        for (int col = 0; col < width; ++col) {
-            signed char v = row_ptr[col];
-            bool match = v == target;
-            if (!inside && match) {
-                inside = true;
-                count += 1;
-            } else if (inside && !match) {
-                inside = false;
-            }
-        }
-        counts[row] = count;
-    }
-    """,
-    "subsetix_count_value_intervals",
-    options=("--std=c++11",),
-)
-
-_ACTION_WRITE_KERNEL = cp.RawKernel(
-    r"""
-    extern "C" __global__
-    void subsetix_write_value_intervals(const signed char* __restrict__ data,
-                                        int rows,
-                                        int width,
-                                        signed char target,
-                                        const int* __restrict__ row_offsets,
-                                        int* __restrict__ begin,
-                                        int* __restrict__ end)
-    {
-        int row = blockIdx.x;
-        if (row >= rows) {
-            return;
-        }
-        const signed char* row_ptr = data + row * width;
-        int offset = row_offsets[row];
-        int local_index = 0;
-        bool inside = false;
-        for (int col = 0; col < width; ++col) {
-            signed char v = row_ptr[col];
-            bool match = v == target;
-            if (!inside && match) {
-                inside = true;
-                begin[offset + local_index] = col;
-            } else if (inside && !match) {
-                inside = false;
-                end[offset + local_index] = col;
-                local_index += 1;
-            }
-        }
-        if (inside) {
-            end[offset + local_index] = width;
-        }
-    }
-    """,
-    "subsetix_write_value_intervals",
-    options=("--std=c++11",),
-)
-
-
-def _intervals_for_value(grid: cp.ndarray, target: int) -> IntervalSet:
-    """
-    Build an IntervalSet describing the cells whose value equals ``target``.
-    """
-
-    cp_mod = _require_cupy()
-    if grid.ndim != 2:
-        raise ValueError("grid must be a 2D array")
-    if grid.dtype != cp_mod.int8:
-        raise TypeError("grid dtype must be int8 for action extraction")
-    rows, width = grid.shape
-    counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
-    if rows > 0:
-        _ACTION_COUNT_KERNEL(
-            (rows,),
-            (1,),
-            (
-                grid,
-                cp_mod.int32(rows),
-                cp_mod.int32(width),
-                cp_mod.int8(target),
-                counts,
-            ),
-        )
-    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
-    row_offsets[0] = 0
-    if rows > 0:
-        cp_mod.cumsum(counts, dtype=cp_mod.int32, out=row_offsets[1:])
-    total = int(row_offsets[-1].item()) if rows > 0 else 0
-    begin = cp_mod.empty(total, dtype=cp_mod.int32)
-    end = cp_mod.empty_like(begin)
-    if total > 0:
-        _ACTION_WRITE_KERNEL(
-            (rows,),
-            (1,),
-            (
-                grid,
-                cp_mod.int32(rows),
-                cp_mod.int32(width),
-                cp_mod.int8(target),
-                row_offsets,
-                begin,
-                end,
-            ),
-        )
-    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
 
 
 def _interval_row_ids(interval_set: IntervalSet) -> cp.ndarray:
     return interval_set.interval_rows().astype(cp.int32, copy=False)
+
+
+def _empty_interval_like(interval_set: IntervalSet) -> IntervalSet:
+    cp_mod = _require_cupy()
+    row_count = interval_set.row_count
+    zero = cp_mod.zeros(0, dtype=cp_mod.int32)
+    row_offsets = cp_mod.zeros(row_count + 1, dtype=cp_mod.int32)
+    rows_attr = interval_set.rows
+    rows_copy = None if rows_attr is None else cp_mod.array(rows_attr, dtype=cp_mod.int32, copy=True)
+    return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets, rows=rows_copy)
+
+
+def _interval_field_value_intervals(field: IntervalField, target) -> IntervalSet:
+    cp_mod = _require_cupy()
+    values = cp_mod.asarray(field.values)
+    total_cells = int(values.size)
+    interval_set = field.interval_set
+    if total_cells == 0:
+        return _empty_interval_like(interval_set)
+
+    dtype_type = values.dtype.type
+    matches = values == dtype_type(target)
+    if not bool(cp_mod.any(matches)):
+        return _empty_interval_like(interval_set)
+
+    cell_indices = cp_mod.arange(total_cells, dtype=cp_mod.int32)
+    offsets = field.interval_cell_offsets.astype(cp_mod.int32, copy=False)
+    interval_indices = cp_mod.searchsorted(offsets[1:], cell_indices, side="right")
+    local_pos = cell_indices - offsets[interval_indices]
+    begin = interval_set.begin.astype(cp_mod.int32, copy=False)
+    cols = begin[interval_indices] + local_pos
+    interval_rows = interval_set.interval_rows().astype(cp_mod.int32, copy=False)
+    rows_for_cells = interval_rows[interval_indices]
+
+    prev_matches = cp_mod.zeros_like(matches, dtype=cp_mod.bool_)
+    if total_cells > 1:
+        prev_matches[1:] = matches[:-1]
+    if offsets.size > 0:
+        prev_matches[offsets[:-1]] = False
+    start_mask = matches & (~prev_matches)
+
+    next_matches = cp_mod.zeros_like(matches, dtype=cp_mod.bool_)
+    if total_cells > 1:
+        next_matches[:-1] = matches[1:]
+    if offsets.size > 1:
+        end_indices = offsets[1:] - 1
+        next_matches[end_indices] = False
+    end_mask = matches & (~next_matches)
+
+    start_idx = cp_mod.where(start_mask)[0]
+    if start_idx.size == 0:
+        return _empty_interval_like(interval_set)
+    end_idx = cp_mod.where(end_mask)[0]
+    if end_idx.size != start_idx.size:
+        raise RuntimeError("mismatched start/end counts when extracting value intervals")
+
+    rows_index = interval_set.rows_index().astype(cp_mod.int32, copy=False)
+    row_count = rows_index.size
+    if row_count == 0:
+        return _empty_interval_like(interval_set)
+    row_positions = cp_mod.searchsorted(rows_index, rows_for_cells[start_idx], side="left")
+    row_counts = cp_mod.bincount(row_positions, minlength=row_count).astype(cp_mod.int32, copy=False)
+    row_offsets = cp_mod.empty(row_count + 1, dtype=cp_mod.int32)
+    row_offsets[0] = 0
+    if row_count > 0:
+        cp_mod.cumsum(row_counts, dtype=cp_mod.int32, out=row_offsets[1:])
+
+    begin_out = cols[start_idx].astype(cp_mod.int32, copy=False)
+    end_out = (cols[end_idx] + 1).astype(cp_mod.int32, copy=False)
+    rows_attr = interval_set.rows
+    rows_copy = None if rows_attr is None else cp_mod.array(rows_attr, dtype=cp_mod.int32, copy=True)
+
+    return IntervalSet(begin=begin_out, end=end_out, row_offsets=row_offsets, rows=rows_copy)
 
 
 def _full_cell_offsets(width: int, height: int) -> cp.ndarray:
@@ -235,67 +187,23 @@ def _copy_intervals_into(dst: cp.ndarray, src: cp.ndarray, interval_set: Interva
     kernel(grid, (block,), (row_ids, interval_set.begin, interval_set.end, src, dst, width))
 
 
-def _get_fill_intervals_kernel(dtype: cp.dtype) -> cp.RawKernel:
-    key = cp.dtype(dtype).str
-    kernel = _FILL_KERNEL_CACHE.get(key)
-    if kernel is not None:
-        return kernel
-    if dtype == cp.int8:
-        type_name = "signed char"
-    elif dtype == cp.int32:
-        type_name = "int"
-    elif dtype == cp.int64:
-        type_name = "long long"
-    elif dtype == cp.float32:
-        type_name = "float"
-    else:
-        raise TypeError("interval fill expects float32/int data")
-    code = f"""
-    extern "C" __global__
-    void fill_intervals_2d(const int* __restrict__ row_ids,
-                           const int* __restrict__ begin,
-                           const int* __restrict__ end,
-                           {type_name} value,
-                           {type_name}* __restrict__ dst,
-                           int width)
-    {{
-        int interval = blockIdx.x;
-        int row = row_ids[interval];
-        int start = begin[interval];
-        int stop = end[interval];
-        if (stop <= start) {{
-            return;
-        }}
-        int base = row * width;
-        for (int col = start + threadIdx.x; col < stop; col += blockDim.x) {{
-            dst[base + col] = value;
-        }}
-    }}
-    """
-    kernel = cp.RawKernel(code, "fill_intervals_2d", options=("--std=c++11",))
-    _FILL_KERNEL_CACHE[key] = kernel
-    return kernel
-
-
-def _fill_intervals(array: cp.ndarray, interval_set: IntervalSet, value) -> None:
-    if array.ndim != 2:
-        raise ValueError("array must be 2D")
-    interval_count = int(interval_set.begin.size)
-    if interval_count == 0:
-        return
-    row_ids = _interval_row_ids(interval_set)
-    kernel = _get_fill_intervals_kernel(array.dtype)
-    block = 128
-    grid = (interval_count,)
-    width = int(array.shape[1])
-    kernel(grid, (block,), (row_ids, interval_set.begin, interval_set.end, array.dtype.type(value), array, width))
-
-
 def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
     cp_mod = _require_cupy()
     dtype_obj = cp_mod.dtype(dtype)
-    if dtype_obj != cp_mod.float32:
-        raise TypeError("interval subset kernels currently support float32 values only")
+    if dtype_obj == cp_mod.float32:
+        type_name = "float"
+    elif dtype_obj == cp_mod.float64:
+        type_name = "double"
+    elif dtype_obj == cp_mod.int8:
+        type_name = "signed char"
+    elif dtype_obj == cp_mod.int32:
+        type_name = "int"
+    elif dtype_obj == cp_mod.int64:
+        type_name = "long long"
+    elif dtype_obj == cp_mod.bool_:
+        type_name = "bool"
+    else:
+        raise TypeError(f"interval subset kernels do not support dtype {dtype_obj}")
     key = (mode, dtype_obj.str)
     kernel = _SUBSET_KERNEL_CACHE.get(key)
     if kernel is not None:
@@ -305,7 +213,7 @@ def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
 
     if mode == "gather":
         func_name = "subsetix_interval_subset_gather"
-        code = r"""
+        template = r"""
         extern "C" __global__
         void subsetix_interval_subset_gather(const int* __restrict__ subset_rows,
                                              const int* __restrict__ subset_begin,
@@ -315,8 +223,8 @@ def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
                                              const int* __restrict__ super_begin,
                                              const int* __restrict__ super_end,
                                              const int* __restrict__ super_cell_offsets,
-                                             const float* __restrict__ super_values,
-                                             float* __restrict__ subset_values,
+                                             const @TYPE@* __restrict__ super_values,
+                                             @TYPE@* __restrict__ subset_values,
                                              int super_row_count)
         {
             int interval = blockIdx.x;
@@ -382,7 +290,6 @@ def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
                     idx += 1;
                 }
                 if (length == 0 && current < stop) {
-                    // advance to avoid infinite loops when current == e
                     current = current + 1;
                 }
             }
@@ -390,7 +297,7 @@ def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
         """
     else:
         func_name = "subsetix_interval_subset_scatter"
-        code = r"""
+        template = r"""
         extern "C" __global__
         void subsetix_interval_subset_scatter(const int* __restrict__ subset_rows,
                                               const int* __restrict__ subset_begin,
@@ -400,8 +307,8 @@ def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
                                               const int* __restrict__ super_begin,
                                               const int* __restrict__ super_end,
                                               const int* __restrict__ super_cell_offsets,
-                                              const float* __restrict__ subset_values,
-                                              float* __restrict__ super_values,
+                                              const @TYPE@* __restrict__ subset_values,
+                                              @TYPE@* __restrict__ super_values,
                                               int super_row_count)
         {
             int interval = blockIdx.x;
@@ -472,6 +379,7 @@ def _get_interval_subset_kernel(mode: str, dtype: cp.dtype) -> cp.RawKernel:
             }
         }
         """
+    code = template.replace("@TYPE@", type_name)
 
     kernel = cp_mod.RawKernel(code, func_name, options=("--std=c++11",))
     _SUBSET_KERNEL_CACHE[key] = kernel
@@ -506,8 +414,8 @@ def _gather_subset_into(field: IntervalField, subset_field: IntervalField) -> No
             super_begin,
             super_end,
             super_offsets,
-            field.values.astype(cp_mod.float32, copy=False),
-            subset_field.values.astype(cp_mod.float32, copy=False),
+            field.values,
+            subset_field.values,
             np.int32(field.interval_set.row_count),
         ),
     )
@@ -541,8 +449,8 @@ def _scatter_subset_from(subset_field: IntervalField, field: IntervalField) -> N
             super_begin,
             super_end,
             super_offsets,
-            subset_field.values.astype(cp_mod.float32, copy=False),
-            field.values.astype(cp_mod.float32, copy=False),
+            subset_field.values,
+            field.values,
             np.int32(field.interval_set.row_count),
         ),
     )
@@ -843,7 +751,9 @@ class ActionField:
         expected_cells = width_int * height_int
         if int(interval_field.values.size) != expected_cells:
             raise ValueError("interval_set must cover exactly width * height cells")
-        return cls(field=interval_field, ratio=int(ratio), width=width_int, height=height_int)
+        action = cls(field=interval_field, ratio=int(ratio), width=width_int, height=height_int)
+        action._refine_set_cache = _empty_interval_like(interval_set)
+        return action
 
     @classmethod
     def full_grid(cls, height: int, width: int, ratio: int, *, default: Action = Action.KEEP) -> "ActionField":
@@ -860,11 +770,8 @@ class ActionField:
             default=default,
         )
 
-    def _grid_view(self) -> cp.ndarray:
-        return self.field.values.reshape(self.height, self.width)
-
     def _refresh_from_values(self) -> None:
-        refine = _intervals_for_value(self._grid_view(), int(Action.REFINE))
+        refine = _interval_field_value_intervals(self.field, int(Action.REFINE))
         self._refine_set_cache = refine
         self._fine_set_cache = None
         self._coarse_only_cache = None
@@ -872,11 +779,30 @@ class ActionField:
     def set_from_interval_set(self, refine_set: IntervalSet) -> None:
         """Populate the action field directly from an IntervalSet."""
 
-        grid = self._grid_view()
-        grid[...] = int(Action.KEEP)
-        if refine_set.begin.size != 0:
-            _fill_intervals(grid, refine_set, int(Action.REFINE))
-        self._refine_set_cache = refine_set
+        if not isinstance(refine_set, IntervalSet):
+            raise TypeError("refine_set must be an IntervalSet")
+        domain = self.field.interval_set
+        if refine_set.begin.size == 0:
+            keep_value = self.field.values.dtype.type(int(Action.KEEP))
+            self.field.values.fill(keep_value)
+            self._refine_set_cache = _empty_interval_like(domain)
+            self._fine_set_cache = None
+            self._coarse_only_cache = None
+            return
+
+        domain_expr = make_input(domain)
+        refine_expr = make_input(refine_set)
+        outside = evaluate(make_difference(refine_expr, domain_expr))
+        if outside.begin.size != 0:
+            raise ValueError("refine_set must be contained within the action domain")
+        aligned = evaluate(make_intersection(refine_expr, domain_expr))
+
+        keep_value = self.field.values.dtype.type(int(Action.KEEP))
+        self.field.values.fill(keep_value)
+        subset_field = create_interval_field(aligned, fill_value=int(Action.REFINE), dtype=self.field.values.dtype)
+        scatter_interval_subset(self.field, subset_field)
+
+        self._refine_set_cache = aligned
         self._fine_set_cache = None
         self._coarse_only_cache = None
 
