@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Iterable, List, Tuple
+import struct
+from typing import Any, Dict, Iterable, List, Tuple, NamedTuple
 
 import numpy as np
 
@@ -174,49 +175,185 @@ def save_amr3_step_vtr(
     return rels, (time_value, rels)
 
 
-def _append_cell(points: List[Tuple[float, float, float]],
-                 connectivity: List[int], offsets: List[int], types: List[int],
-                 x0: float, y0: float, dx: float, dy: float, i: int, j: int) -> None:
-    # 4 points per quad, order: (x0,y0),(x1,y0),(x1,y1),(x0,y1)
-    idx0 = len(points)
-    x = x0 + j * dx; y = y0 + i * dy
-    points.append((x, y, 0.0))
-    points.append((x + dx, y, 0.0))
-    points.append((x + dx, y + dy, 0.0))
-    points.append((x, y + dy, 0.0))
-    connectivity.extend([idx0, idx0 + 1, idx0 + 2, idx0 + 3])
-    offsets.append(len(connectivity))
-    types.append(9)  # VTK_QUAD
+class _QuadChunk(NamedTuple):
+    cell_count: int
+    points: np.ndarray
+    connectivity: np.ndarray
+    offsets: np.ndarray
+    types: np.ndarray
+    levels: np.ndarray
+    values: np.ndarray
+    ghosts: np.ndarray
 
 
-def _interval_field_cells(field) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    from subsetix_cupy.interval_field import IntervalField
+def _empty_chunk() -> _QuadChunk:
+    empty_float = np.zeros((0, 3), dtype=np.float32)
+    empty_int = np.zeros(0, dtype=np.int32)
+    empty_u8 = np.zeros(0, dtype=np.uint8)
+    return _QuadChunk(
+        cell_count=0,
+        points=empty_float,
+        connectivity=empty_int,
+        offsets=empty_int,
+        types=empty_u8,
+        levels=empty_int,
+        values=np.zeros(0, dtype=np.float32),
+        ghosts=empty_int,
+    )
 
-    if not isinstance(field, IntervalField):
-        raise TypeError("field must be an IntervalField")
 
-    begin = _to_numpy(field.interval_set.begin).astype(np.int32, copy=False)
-    end = _to_numpy(field.interval_set.end).astype(np.int32, copy=False)
-    rows = _to_numpy(field.interval_set.interval_rows()).astype(np.int32, copy=False)
-    offsets = _to_numpy(field.interval_cell_offsets).astype(np.int32, copy=False)
-    values = _to_numpy(field.values).astype(np.float32, copy=False)
-
-    counts = end - begin
-    total = int(counts.sum()) if counts.size else 0
+def _assemble_quads(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    values: np.ndarray,
+    *,
+    level: int,
+    dx: float,
+    dy: float,
+    x0: float,
+    y0: float,
+    ghost_values: np.ndarray,
+) -> _QuadChunk:
+    total = rows.size
     if total == 0:
-        return (
-            np.zeros(0, dtype=np.int32),
-            np.zeros(0, dtype=np.int32),
-            np.zeros(0, dtype=np.float32),
-        )
+        return _empty_chunk()
 
-    row_rep = np.repeat(rows, counts)
-    cols_segments = [np.arange(b, e, dtype=np.int32) for b, e in zip(begin, end)]
-    cols = np.concatenate(cols_segments) if cols_segments else np.zeros(0, dtype=np.int32)
-    value_segments = [values[offsets[i]: offsets[i + 1]] for i in range(len(offsets) - 1)]
-    vals = np.concatenate(value_segments) if value_segments else np.zeros(0, dtype=np.float32)
-    return row_rep, cols, vals
+    rows = rows.astype(np.int32, copy=False)
+    cols = cols.astype(np.int32, copy=False)
+    vals = values.astype(np.float32, copy=False)
+    ghost_vals = ghost_values.astype(np.int32, copy=False)
 
+    dx32 = np.float32(dx)
+    dy32 = np.float32(dy)
+    x0_32 = np.float32(x0)
+    y0_32 = np.float32(y0)
+
+    x_left = x0_32 + cols.astype(np.float32, copy=False) * dx32
+    x_right = x_left + dx32
+    y_bottom = y0_32 + rows.astype(np.float32, copy=False) * dy32
+    y_top = y_bottom + dy32
+
+    points = np.empty((total * 4, 3), dtype=np.float32)
+    # (x0, y0)
+    points[0::4, 0] = x_left
+    points[0::4, 1] = y_bottom
+    points[0::4, 2] = 0.0
+    # (x1, y0)
+    points[1::4, 0] = x_right
+    points[1::4, 1] = y_bottom
+    points[1::4, 2] = 0.0
+    # (x1, y1)
+    points[2::4, 0] = x_right
+    points[2::4, 1] = y_top
+    points[2::4, 2] = 0.0
+    # (x0, y1)
+    points[3::4, 0] = x_left
+    points[3::4, 1] = y_top
+    points[3::4, 2] = 0.0
+
+    connectivity = np.arange(total * 4, dtype=np.int32)
+    offsets = np.arange(1, total + 1, dtype=np.int32) * 4
+    types = np.full(total, 9, dtype=np.uint8)
+    levels = np.full(total, int(level), dtype=np.int32)
+
+    return _QuadChunk(
+        cell_count=total,
+        points=points,
+        connectivity=connectivity,
+        offsets=offsets,
+        types=types,
+        levels=levels,
+        values=vals,
+        ghosts=ghost_vals,
+    )
+
+
+def _interval_field_chunk(
+    field,
+    level: int,
+    dx: float,
+    dy: float,
+    x0: float,
+    y0: float,
+    ghost_flag: int,
+) -> _QuadChunk:
+    if cp is None:
+        raise RuntimeError("IntervalField export requires CuPy")
+
+    offsets = field.interval_cell_offsets
+    if offsets.size == 0:
+        return _empty_chunk()
+
+    total = int(offsets[-1].item())
+    if total == 0:
+        return _empty_chunk()
+
+    offsets = offsets.astype(cp.int32, copy=False)
+    begin = field.interval_set.begin.astype(cp.int32, copy=False)
+    interval_rows = field.interval_set.interval_rows().astype(cp.int32, copy=False)
+
+    cell_ids = cp.arange(total, dtype=cp.int32)
+    interval_idx = cp.searchsorted(offsets[1:], cell_ids, side="right")
+    local = cell_ids - offsets[interval_idx]
+    cols = begin[interval_idx] + local
+    rows = interval_rows[interval_idx]
+
+    rows_np = cp.asnumpy(rows)
+    cols_np = cp.asnumpy(cols)
+    values_np = cp.asnumpy(field.values.astype(cp.float32, copy=False))
+    ghost_vals = np.full(total, int(ghost_flag), dtype=np.int32)
+
+    return _assemble_quads(
+        rows_np,
+        cols_np,
+        values_np,
+        level=level,
+        dx=dx,
+        dy=dy,
+        x0=x0,
+        y0=y0,
+        ghost_values=ghost_vals,
+    )
+
+
+def _mask_chunk(
+    mask,
+    u,
+    level: int,
+    dx: float,
+    dy: float,
+    x0: float,
+    y0: float,
+    ghost,
+) -> _QuadChunk:
+    mask_np = _to_numpy(mask).astype(np.bool_, copy=False)
+    idxs = np.argwhere(mask_np)
+    if idxs.size == 0:
+        return _empty_chunk()
+
+    rows = idxs[:, 0].astype(np.int32, copy=False)
+    cols = idxs[:, 1].astype(np.int32, copy=False)
+    values = _to_numpy(u).astype(np.float32, copy=False)[rows, cols]
+
+    if ghost is None:
+        ghost_vals = np.zeros(rows.shape[0], dtype=np.int32)
+    else:
+        ghost_arr = _to_numpy(ghost)
+        if ghost_arr.dtype == np.bool_:
+            ghost_arr = ghost_arr.astype(np.int32, copy=False)
+        ghost_vals = ghost_arr[rows, cols].astype(np.int32, copy=False)
+
+    return _assemble_quads(
+        rows,
+        cols,
+        values,
+        level=level,
+        dx=dx,
+        dy=dy,
+        x0=x0,
+        y0=y0,
+        ghost_values=ghost_vals,
+    )
 
 def write_unstructured_quads_vtu(
     path: str,
@@ -228,13 +365,7 @@ def write_unstructured_quads_vtu(
     cells: list of tuples (mask, u, level_id, dx, dy, x0, y0) per level.
     u is sampled cell-centered per cell; level_id is written to CellData 'level'.
     """
-    points: List[Tuple[float, float, float]] = []
-    connectivity: List[int] = []
-    offsets: List[int] = []
-    types: List[int] = []
-    levels: List[int] = []
-    values: List[float] = []
-    ghosts: List[int] = []
+    chunks: List[_QuadChunk] = []
 
     for entry in cells:
         if not entry:
@@ -244,13 +375,9 @@ def write_unstructured_quads_vtu(
             if len(entry) < 7:
                 raise ValueError("IntervalField entries must be (field, level, dx, dy, x0, y0, ghost_flag)")
             field, lvl, dx, dy, x0, y0, ghost_flag = entry[:7]
-            rows_arr, cols_arr, vals_arr = _interval_field_cells(field)
-            ghost_val = int(ghost_flag)
-            for row, col, val in zip(rows_arr, cols_arr, vals_arr, strict=True):
-                _append_cell(points, connectivity, offsets, types, x0, y0, dx, dy, int(row), int(col))
-                levels.append(int(lvl))
-                values.append(float(val))
-                ghosts.append(ghost_val)
+            chunk = _interval_field_chunk(field, int(lvl), float(dx), float(dy), float(x0), float(y0), int(ghost_flag))
+            if chunk.cell_count:
+                chunks.append(chunk)
             continue
 
         if len(entry) == 7:
@@ -258,55 +385,105 @@ def write_unstructured_quads_vtu(
             ghost = None
         else:
             mask, u, lvl, dx, dy, x0, y0, ghost = entry
-        m = _to_numpy(mask).astype(bool, copy=False)
-        arr = _to_numpy(u).astype(np.float32, copy=False)
-        g_arr = None if ghost is None else _to_numpy(ghost).astype(bool, copy=False)
-        idxs = np.argwhere(m)
-        for i, j in idxs:
-            _append_cell(points, connectivity, offsets, types, x0, y0, dx, dy, int(i), int(j))
-            levels.append(int(lvl))
-            values.append(float(arr[i, j]))
-            if g_arr is None:
-                ghosts.append(0)
-            else:
-                ghosts.append(int(bool(g_arr[i, j])))
+        chunk = _mask_chunk(mask, u, int(lvl), float(dx), float(dy), float(x0), float(y0), ghost)
+        if chunk.cell_count:
+            chunks.append(chunk)
 
-    P = np.asarray(points, dtype=np.float32)
-    C = np.asarray(connectivity, dtype=np.int32)
-    O = np.asarray(offsets, dtype=np.int32)
-    T = np.asarray(types, dtype=np.uint8)
-    L = np.asarray(levels, dtype=np.int32)
-    U = np.asarray(values, dtype=np.float32)
+    if chunks:
+        point_count = sum(chunk.points.shape[0] for chunk in chunks)
+        cell_count = sum(chunk.cell_count for chunk in chunks)
+        connectivity_size = sum(chunk.connectivity.size for chunk in chunks)
+
+        P = np.empty((point_count, 3), dtype=np.float32)
+        C = np.empty(connectivity_size, dtype=np.int32)
+        O = np.empty(cell_count, dtype=np.int32)
+        T = np.empty(cell_count, dtype=np.uint8)
+        L = np.empty(cell_count, dtype=np.int32)
+        U = np.empty(cell_count, dtype=np.float32)
+        G = np.empty(cell_count, dtype=np.int32)
+
+        point_offset = 0
+        conn_offset = 0
+        cell_offset = 0
+        for chunk in chunks:
+            pts = chunk.points
+            cnt = chunk.connectivity
+            offs = chunk.offsets
+            cells = chunk.cell_count
+
+            P[point_offset : point_offset + pts.shape[0]] = pts
+            C[conn_offset : conn_offset + cnt.size] = cnt + point_offset
+            O[cell_offset : cell_offset + cells] = offs + conn_offset
+            T[cell_offset : cell_offset + cells] = chunk.types
+            L[cell_offset : cell_offset + cells] = chunk.levels
+            U[cell_offset : cell_offset + cells] = chunk.values
+            G[cell_offset : cell_offset + cells] = chunk.ghosts
+
+            point_offset += pts.shape[0]
+            conn_offset += cnt.size
+            cell_offset += cells
+    else:
+        P = np.zeros((0, 3), dtype=np.float32)
+        C = np.zeros(0, dtype=np.int32)
+        O = np.zeros(0, dtype=np.int32)
+        T = np.zeros(0, dtype=np.uint8)
+        L = np.zeros(0, dtype=np.int32)
+        U = np.zeros(0, dtype=np.float32)
+        G = np.zeros(0, dtype=np.int32)
+
+    appended_arrays: List[Tuple[np.ndarray, int]] = []
+    appended_offset = 0
+
+    def _register_array(arr: np.ndarray) -> int:
+        nonlocal appended_offset
+        array = arr
+        if not array.flags["C_CONTIGUOUS"]:
+            array = np.ascontiguousarray(array)
+        offset = appended_offset
+        appended_arrays.append((array, offset))
+        appended_offset += 8 + array.nbytes
+        return offset
+
+    level_offset = _register_array(L)
+    ghost_offset = _register_array(G)
+    u_offset = _register_array(U)
+    points_offset = _register_array(P)
+    connectivity_offset = _register_array(C)
+    offsets_offset = _register_array(O)
+    types_offset = _register_array(T)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("<?xml version=\"1.0\"?>\n")
-        f.write("<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n")
-        f.write("  <UnstructuredGrid>\n")
-        f.write(f"    <Piece NumberOfPoints=\"{P.shape[0]}\" NumberOfCells=\"{len(L)}\">\n")
-        f.write("      <CellData Scalars=\"u\">\n")
-        _write_dataarray_ascii(f, "level", L, "Int32")
-        ghost_arr = np.asarray(ghosts, dtype=np.int32)
-        _write_dataarray_ascii(f, "ghost_mask", ghost_arr, "Int32")
-        _write_dataarray_ascii(f, "u", U, "Float32")
-        f.write("      </CellData>\n")
-        f.write("      <Points>\n")
-        f.write('        <DataArray type="Float32" NumberOfComponents="3" format="ascii">\n')
-        for i in range(0, P.shape[0], 4096):
-            chunk = P[i : i + 4096]
-            f.write("          ")
-            f.write(" ".join(f"{x} {y} 0" for x, y, _ in chunk))
-            f.write("\n")
-        f.write("        </DataArray>\n")
-        f.write("      </Points>\n")
-        f.write("      <Cells>\n")
-        _write_dataarray_ascii(f, "connectivity", C, "Int32")
-        _write_dataarray_ascii(f, "offsets", O, "Int32")
-        _write_dataarray_ascii(f, "types", T, "UInt8")
-        f.write("      </Cells>\n")
-        f.write("    </Piece>\n")
-        f.write("  </UnstructuredGrid>\n")
-        f.write("</VTKFile>\n")
+    with open(path, "wb") as f:
+        def _write(line: str) -> None:
+            f.write(line.encode("utf-8"))
+
+        _write("<?xml version=\"1.0\"?>\n")
+        _write('<VTKFile type="UnstructuredGrid" version="0.1" byte_order="LittleEndian" header_type="UInt64">\n')
+        _write("  <UnstructuredGrid>\n")
+        _write(f"    <Piece NumberOfPoints=\"{int(P.shape[0])}\" NumberOfCells=\"{int(L.size)}\">\n")
+        _write("      <CellData Scalars=\"u\">\n")
+        _write(f'        <DataArray type="Int32" Name="level" format="appended" offset="{level_offset}"/>\n')
+        _write(f'        <DataArray type="Int32" Name="ghost_mask" format="appended" offset="{ghost_offset}"/>\n')
+        _write(f'        <DataArray type="Float32" Name="u" format="appended" offset="{u_offset}"/>\n')
+        _write("      </CellData>\n")
+        _write("      <Points>\n")
+        _write(f'        <DataArray type="Float32" NumberOfComponents="3" format="appended" offset="{points_offset}"/>\n')
+        _write("      </Points>\n")
+        _write("      <Cells>\n")
+        _write(f'        <DataArray type="Int32" Name="connectivity" format="appended" offset="{connectivity_offset}"/>\n')
+        _write(f'        <DataArray type="Int32" Name="offsets" format="appended" offset="{offsets_offset}"/>\n')
+        _write(f'        <DataArray type="UInt8" Name="types" format="appended" offset="{types_offset}"/>\n')
+        _write("      </Cells>\n")
+        _write("    </Piece>\n")
+        _write("  </UnstructuredGrid>\n")
+        _write("  <AppendedData encoding=\"raw\">\n")
+        f.write(b"_")
+        for array, _ in appended_arrays:
+            f.write(struct.pack("<Q", array.nbytes))
+            f.write(array.tobytes(order="C"))
+        f.write(b"\n")
+        _write("  </AppendedData>\n")
+        _write("</VTKFile>\n")
 
 
 def save_amr3_mesh_vtu(
