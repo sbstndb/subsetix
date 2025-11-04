@@ -34,8 +34,7 @@ def _empty_interval_like(interval_set: IntervalSet) -> IntervalSet:
     row_count = interval_set.row_count
     zero = cp_mod.zeros(0, dtype=cp_mod.int32)
     row_offsets = cp_mod.zeros(row_count + 1, dtype=cp_mod.int32)
-    rows_attr = interval_set.rows
-    rows_copy = None if rows_attr is None else cp_mod.array(rows_attr, dtype=cp_mod.int32, copy=True)
+    rows_copy = cp_mod.array(interval_set.rows, dtype=cp_mod.int32, copy=True)
     return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets, rows=rows_copy)
 
 
@@ -96,8 +95,7 @@ def _interval_field_value_intervals(field: IntervalField, target) -> IntervalSet
 
     begin_out = cols[start_idx].astype(cp_mod.int32, copy=False)
     end_out = (cols[end_idx] + 1).astype(cp_mod.int32, copy=False)
-    rows_attr = interval_set.rows
-    rows_copy = None if rows_attr is None else cp_mod.array(rows_attr, dtype=cp_mod.int32, copy=True)
+    rows_copy = cp_mod.array(interval_set.rows, dtype=cp_mod.int32, copy=True)
 
     return IntervalSet(begin=begin_out, end=end_out, row_offsets=row_offsets, rows=rows_copy)
 

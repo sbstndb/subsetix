@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 import importlib
 import sys
@@ -94,16 +94,6 @@ def _ensure_int32(array: Sequence[int]):
     return cp.asarray(array, dtype=cp.int32)
 
 
-def _empty_int32(length: int):
-    cp = _require_cupy()
-    return cp.empty(length, dtype=cp.int32)
-
-
-def _as_int32(array):
-    cp = _require_cupy()
-    return cp.asarray(array, dtype=cp.int32)
-
-
 def _row_layout_equal(lhs: "IntervalSet", rhs: "IntervalSet") -> bool:
     if lhs.row_count != rhs.row_count:
         return False
@@ -127,11 +117,11 @@ def _reindex_interval_set(interval_set: "IntervalSet", rows_out) -> "IntervalSet
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
 
     rows_in = interval_set.rows_index()
-    row_offsets_in = cp.asarray(interval_set.row_offsets, dtype=cp.int32)
     begin_in = cp.asarray(interval_set.begin, dtype=cp.int32)
     end_in = cp.asarray(interval_set.end, dtype=cp.int32)
+    row_offsets_in = cp.asarray(interval_set.row_offsets, dtype=cp.int32)
 
-    if rows_in.size == rows_out.size and bool(cp.all(rows_in == rows_out)):
+    if rows_in.size == rows_out.size and bool(rows_out.size == 0 or cp.all(rows_in == rows_out)):
         return IntervalSet(
             begin=begin_in,
             end=end_in,
@@ -140,46 +130,47 @@ def _reindex_interval_set(interval_set: "IntervalSet", rows_out) -> "IntervalSet
         )
 
     row_count_out = int(rows_out.size)
-    counts = cp.zeros(row_count_out, dtype=cp.int32)
+    rows_per_interval = interval_set.interval_rows()
+    if rows_per_interval.size == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(row_count_out + 1, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
 
-    if rows_in.size:
-        positions = cp.searchsorted(rows_in, rows_out)
-        matches = cp.zeros(row_count_out, dtype=cp.bool_)
-        valid = positions < rows_in.size
-        if int(valid.sum()) > 0:
-            idx_valid = cp.where(valid)[0]
-            pos_valid = positions[valid]
-            eq_mask = rows_in[pos_valid] == rows_out[valid]
-            if int(eq_mask.sum()) > 0:
-                idx_matched = idx_valid[eq_mask]
-                pos_matched = pos_valid[eq_mask]
-                counts_matched = row_offsets_in[pos_matched + 1] - row_offsets_in[pos_matched]
-                counts[idx_matched] = counts_matched.astype(cp.int32, copy=False)
-                matches[idx_matched] = True
+    positions = cp.searchsorted(rows_out, rows_per_interval).astype(cp.int32, copy=False)
+    valid = positions < row_count_out
 
+    matched_interval_idx = cp.zeros(0, dtype=cp.int32)
+    matched_positions = cp.zeros(0, dtype=cp.int32)
+    if int(valid.sum()) > 0:
+        valid_idx = cp.where(valid)[0].astype(cp.int32, copy=False)
+        target_rows = positions[valid]
+        equal = rows_out[target_rows] == rows_per_interval[valid]
+        if int(equal.sum()) > 0:
+            matched_interval_idx = valid_idx[equal].astype(cp.int32, copy=False)
+            matched_positions = target_rows[equal].astype(cp.int32, copy=False)
+
+    if matched_interval_idx.size == 0:
+        zero = cp.zeros(0, dtype=cp.int32)
+        offsets = cp.zeros(row_count_out + 1, dtype=cp.int32)
+        return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
+
+    if matched_interval_idx.size > 1:
+        order = cp.lexsort(cp.stack((matched_interval_idx, matched_positions)))
+        matched_interval_idx = matched_interval_idx[order]
+        matched_positions = matched_positions[order]
+
+    counts = cp.bincount(matched_positions, minlength=row_count_out).astype(cp.int32, copy=False)
     row_offsets_out = cp.empty(row_count_out + 1, dtype=cp.int32)
     row_offsets_out[0] = 0
-    if row_count_out > 0:
-        cp.cumsum(counts, dtype=cp.int32, out=row_offsets_out[1:])
+    cp.cumsum(counts, dtype=cp.int32, out=row_offsets_out[1:])
     total = int(row_offsets_out[-1].item())
+
     if total == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         return IntervalSet(begin=zero, end=zero, row_offsets=row_offsets_out, rows=rows_out)
 
-    mapping = cp.full(row_count_out, -1, dtype=cp.int32)
-    if int(matches.sum()) > 0:
-        mapping[matches] = positions[matches]
-
-    output_pos = cp.arange(total, dtype=cp.int32)
-    row_for_output = cp.searchsorted(row_offsets_out[1:], output_pos, side="right")
-    source_row = mapping[row_for_output]
-    if int((source_row < 0).sum()) > 0:
-        raise ValueError("IntervalSet alignment produced unmapped rows")
-    offset_in_row = output_pos - row_offsets_out[row_for_output]
-    source_index = row_offsets_in[source_row] + offset_in_row
-
-    begin_out = begin_in[source_index]
-    end_out = end_in[source_index]
+    begin_out = begin_in[matched_interval_idx]
+    end_out = end_in[matched_interval_idx]
 
     return IntervalSet(
         begin=begin_out,
@@ -209,14 +200,14 @@ class IntervalSet:
 
     Intervals are stored in a compressed-row layout where `row_offsets`
     contains the exclusive prefix sums for each logical row. The ``rows``
-    array holds the (sorted, strictly increasing) row identifiers; when
-    omitted the layout defaults to the dense range ``[0, row_count)``.
+    array holds the (sorted, strictly increasing) row identifiers and must
+    always be provided explicitly by callers.
     """
 
     begin: Any
     end: Any
     row_offsets: Any
-    rows: Optional[Any] = None
+    rows: Any
 
     def __post_init__(self) -> None:
         cp = _require_cupy()
@@ -267,18 +258,17 @@ class IntervalSet:
 
         rows_attr = self.rows
         if rows_attr is None:
-            rows_arr = cp.arange(row_count, dtype=cp.int32)
-        else:
-            rows_arr = cp.asarray(rows_attr, dtype=cp.int32)
-            if rows_arr.ndim != 1:
-                raise ValueError("rows must be one-dimensional")
-            length = int(rows_arr.size)
-            if length != row_count:
-                raise ValueError("rows length must match row_offsets size - 1")
-            if length > 1:
-                diffs = rows_arr[1:] - rows_arr[:-1]
-                if not bool(cp.all(diffs > 0)):
-                    raise ValueError("rows must be strictly increasing")
+            raise ValueError("rows must be provided")
+        rows_arr = cp.asarray(rows_attr, dtype=cp.int32)
+        if rows_arr.ndim != 1:
+            raise ValueError("rows must be one-dimensional")
+        length = int(rows_arr.size)
+        if length != row_count:
+            raise ValueError("rows length must match row_offsets size - 1")
+        if length > 1:
+            diffs = rows_arr[1:] - rows_arr[:-1]
+            if not bool(cp.all(diffs > 0)):
+                raise ValueError("rows must be strictly increasing")
 
         object.__setattr__(self, "rows", rows_arr)
 
@@ -302,8 +292,6 @@ class IntervalSet:
             return cp.zeros(0, dtype=cp.int32)
         positions = cp.arange(total, dtype=cp.int32)
         row_indices = cp.searchsorted(row_offsets[1:], positions, side="right")
-        if rows.size == 0:
-            return row_indices.astype(cp.int32, copy=False)
         return rows[row_indices]
 
 
@@ -389,6 +377,14 @@ class _InputExpr(Expr):
         return self._set
 
 
+class _CallableExpr(Expr):
+    def __init__(self, func):
+        self._func = func
+
+    def evaluate(self, workspace: CuPyWorkspace | None = None) -> IntervalSet:
+        return self._func(workspace)
+
+
 class _BinaryExpr(Expr):
     def __init__(self, lhs: Expr, rhs: Expr, mode: str):
         self._lhs = lhs
@@ -399,33 +395,6 @@ class _BinaryExpr(Expr):
         lhs_set = self._lhs.evaluate(workspace)
         rhs_set = self._rhs.evaluate(workspace)
         return _apply_binary(lhs_set, rhs_set, self._mode, workspace)
-
-
-class _SymmetricDifferenceExpr(Expr):
-    def __init__(self, lhs: Expr, rhs: Expr):
-        self._lhs = lhs
-        self._rhs = rhs
-
-    def evaluate(self, workspace: CuPyWorkspace | None = None) -> IntervalSet:
-        lhs_set = self._lhs.evaluate(workspace)
-        rhs_set = self._rhs.evaluate(workspace)
-        left_minus_right = _apply_binary(lhs_set, rhs_set, "difference", workspace)
-        right_minus_left = _apply_binary(rhs_set, lhs_set, "difference", workspace)
-        return _apply_binary(left_minus_right, right_minus_left, "union", workspace)
-
-
-class _ComplementExpr(Expr):
-    def __init__(self, universe: Expr, subset: Expr):
-        self._universe = universe
-        self._subset = subset
-
-    def evaluate(self, workspace: CuPyWorkspace | None = None) -> IntervalSet:
-        return _apply_binary(
-            self._universe.evaluate(workspace),
-            self._subset.evaluate(workspace),
-            "difference",
-            workspace,
-        )
 
 
 def make_input(interval_set: IntervalSet) -> Expr:
@@ -446,11 +415,25 @@ def make_difference(lhs: Expr, rhs: Expr) -> Expr:
 
 
 def make_symmetric_difference(lhs: Expr, rhs: Expr) -> Expr:
-    return _SymmetricDifferenceExpr(lhs, rhs)
+    def _evaluate(workspace: CuPyWorkspace | None) -> IntervalSet:
+        lhs_set = lhs.evaluate(workspace)
+        rhs_set = rhs.evaluate(workspace)
+        left_minus_right = _apply_binary(lhs_set, rhs_set, "difference", workspace)
+        right_minus_left = _apply_binary(rhs_set, lhs_set, "difference", workspace)
+        return _apply_binary(left_minus_right, right_minus_left, "union", workspace)
+
+    return _CallableExpr(_evaluate)
 
 
 def make_complement(universe: Expr, subset: Expr) -> Expr:
-    return _ComplementExpr(universe, subset)
+    return _CallableExpr(
+        lambda workspace: _apply_binary(
+            universe.evaluate(workspace),
+            subset.evaluate(workspace),
+            "difference",
+            workspace,
+        )
+    )
 
 
 def evaluate(expr: Expr, workspace: CuPyWorkspace | None = None) -> IntervalSet:
@@ -483,7 +466,12 @@ def build_interval_set(
     last = int(offsets_arr[-1].item())
     if last != len(begin_arr):
         raise ValueError("row_offsets final entry must equal the interval count")
-    rows_arr = _ensure_int32(rows) if rows is not None else None
+    cp = _require_cupy()
+    if rows is None:
+        row_count = int(offsets_arr.size - 1)
+        rows_arr = cp.arange(row_count, dtype=cp.int32)
+    else:
+        rows_arr = _ensure_int32(rows)
     return IntervalSet(
         begin=begin_arr,
         end=end_arr,
@@ -503,31 +491,29 @@ def _apply_binary(
         raise TypeError("Inputs must be CuPy arrays; CPU fallback is disabled")
 
     lhs_aligned, rhs_aligned, rows_index = _align_interval_sets(lhs, rhs)
-    return _apply_binary_gpu(lhs_aligned, rhs_aligned, mode, workspace, rows_index)
-
-
-def _apply_binary_gpu(
-    lhs: IntervalSet,
-    rhs: IntervalSet,
-    mode: str,
-    workspace: CuPyWorkspace | None,
-    rows_index,
-) -> IntervalSet:
-    cp = _require_cupy()
-    row_count = int(lhs.row_offsets.size - 1)
+    rows_out = cp.asarray(rows_index, dtype=cp.int32)
+    row_count = int(lhs_aligned.row_offsets.size - 1)
     if row_count == 0:
         zero = cp.zeros(0, dtype=cp.int32)
         offsets = cp.zeros(1, dtype=cp.int32)
-        rows_out = cp.asarray(rows_index, dtype=cp.int32) if rows_index is not None else None
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
 
     kernels = _get_kernels(cp)
     count_kernel = kernels[0]
     write_kernel = kernels[1]
-    if workspace is not None:
-        counts = workspace.ensure_counts(row_count)
-    else:
-        counts = cp.empty(row_count, dtype=cp.int32)
+
+    def _workspace_counts(count: int):
+        return workspace.ensure_counts(count) if workspace is not None else cp.empty(count, dtype=cp.int32)
+
+    def _workspace_offsets(count: int):
+        return workspace.ensure_offsets(count) if workspace is not None else cp.empty(count + 1, dtype=cp.int32)
+
+    def _workspace_output(total: int):
+        if workspace is not None:
+            return workspace.acquire_output(total)
+        return cp.empty(total, dtype=cp.int32), cp.empty(total, dtype=cp.int32)
+
+    counts = _workspace_counts(row_count)
     block = 128
     grid = (row_count + block - 1) // block
     op_code = _OPERATION_CODES[mode]
@@ -536,46 +522,38 @@ def _apply_binary_gpu(
         (grid,),
         (block,),
         (
-            lhs.begin,
-            lhs.end,
-            lhs.row_offsets,
-            rhs.begin,
-            rhs.end,
-            rhs.row_offsets,
+            lhs_aligned.begin,
+            lhs_aligned.end,
+            lhs_aligned.row_offsets,
+            rhs_aligned.begin,
+            rhs_aligned.end,
+            rhs_aligned.row_offsets,
             np.int32(row_count),
             np.int32(op_code),
             counts,
         ),
     )
 
-    if workspace is not None:
-        offsets = workspace.ensure_offsets(row_count)
-    else:
-        offsets = cp.empty(row_count + 1, dtype=cp.int32)
+    offsets = _workspace_offsets(row_count)
     offsets[0] = 0
     cp.cumsum(counts, dtype=cp.int32, out=offsets[1:])
     total = int(offsets[-1].get())
     if total == 0:
         zero = cp.zeros(0, dtype=cp.int32)
-        rows_out = cp.asarray(rows_index, dtype=cp.int32)
         return IntervalSet(begin=zero, end=zero, row_offsets=offsets, rows=rows_out)
 
-    if workspace is not None:
-        out_begin, out_end = workspace.acquire_output(total)
-    else:
-        out_begin = cp.empty(total, dtype=cp.int32)
-        out_end = cp.empty(total, dtype=cp.int32)
+    out_begin, out_end = _workspace_output(total)
 
     write_kernel(
         (grid,),
         (block,),
         (
-            lhs.begin,
-            lhs.end,
-            lhs.row_offsets,
-            rhs.begin,
-            rhs.end,
-            rhs.row_offsets,
+            lhs_aligned.begin,
+            lhs_aligned.end,
+            lhs_aligned.row_offsets,
+            rhs_aligned.begin,
+            rhs_aligned.end,
+            rhs_aligned.row_offsets,
             offsets,
             np.int32(row_count),
             np.int32(op_code),
@@ -584,7 +562,6 @@ def _apply_binary_gpu(
         ),
     )
 
-    rows_out = cp.asarray(rows_index, dtype=cp.int32)
     return IntervalSet(begin=out_begin, end=out_end, row_offsets=offsets, rows=rows_out)
 _OPERATION_CODES = {"union": 0, "intersection": 1, "difference": 2}
 
