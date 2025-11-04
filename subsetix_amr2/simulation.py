@@ -204,7 +204,7 @@ class AMR2Simulation:
         row_ids = interval.rows_index()
         expected_rows = cp.arange(height, dtype=cp.int32)
         if row_ids.size != expected_rows.size or not bool(cp.all(row_ids == expected_rows)):
-            raise ValueError("coarse_field rows must cover the dense range [0, height)")
+            raise ValueError("coarse_field rows must match the simulation row ids [0, height)")
         intervals_per_row = interval.row_offsets[1:] - interval.row_offsets[:-1]
         if not bool(cp.all(intervals_per_row == 1)):
             raise ValueError("coarse_field must contain exactly one interval per row")

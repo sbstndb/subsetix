@@ -446,8 +446,10 @@ class ActionField:
     Interval-backed field encoding AMR actions per coarse cell.
 
     The field stores a value per coarse cell using an IntervalField covering the
-    entire grid. Cached dense masks and interval sets are refreshed only when
-    the field is updated.
+    entire grid. Callers must supply an interval geometry whose row identifiers
+    already match the target coarse domain; no implicit densification or
+    placeholder rows are injected. Cached masks and interval sets are refreshed
+    only when the field is updated.
     """
 
     field: IntervalField
@@ -479,10 +481,10 @@ class ActionField:
             raise ValueError("interval_set row count must match height")
         row_ids = interval_set.rows_index()
         if row_ids.size != height_int:
-            raise ValueError("interval_set rows must cover the dense range [0, height)")
+            raise ValueError("interval_set must provide exactly one row per coarse index")
         expected_rows = cp_mod.arange(height_int, dtype=cp_mod.int32)
         if row_ids.size and not bool(cp_mod.all(row_ids == expected_rows)):
-            raise ValueError("interval_set rows must be the dense range [0, height)")
+            raise ValueError("interval_set row ids must equal the coarse domain [0, height)")
         interval_field = create_interval_field(interval_set, fill_value=int(default), dtype=cp_mod.int8)
         expected_cells = width_int * height_int
         if int(interval_field.values.size) != expected_cells:

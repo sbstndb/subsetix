@@ -5,10 +5,11 @@ top of the GPU-based interval operations provided by `subsetix`.
 
 The package exposes:
 
-- `subsetix_amr2.geometry.TwoLevelGeometry` – construct AMR layouts from dense
-  refinement masks and keep the corresponding `IntervalSet` representations.
-- `subsetix_amr2.fields` – coarse/fine synchronisation helpers operating on
-  dense CuPy arrays while respecting the geometry.
+- `subsetix_amr2.geometry.TwoLevelGeometry` – build AMR layouts directly from
+  interval-based refinement masks and keep the corresponding `IntervalSet`
+  representations.
+- `subsetix_amr2.fields` – coarse/fine synchronisation helpers working with
+  interval-backed fields while respecting the geometry.
 - `subsetix_amr2.regrid` – gradient-based mask generation and grading helpers.
 
 The goal is to decouple AMR-specific logic from higher level demos so that

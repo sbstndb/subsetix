@@ -147,9 +147,15 @@ class IntervalSet:
     Representation of a collection of half-open [begin, end) intervals.
 
     Intervals are stored in a compressed-row layout where `row_offsets`
-    contains the exclusive prefix sums for each logical row. The ``rows``
-    array holds the (sorted, strictly increasing) row identifiers and must
-    always be provided explicitly by callers.
+    contains the exclusive prefix sums for each logical row. Callers must
+    always provide a ``rows`` array alongside the geometry; there is no
+    implicit densification. The following invariants hold:
+
+    * ``row_offsets`` has length ``row_count + 1`` with ``row_offsets[0] == 0``.
+    * ``rows`` is one-dimensional, strictly increasing, and matches
+      ``row_offsets.size - 1``.
+    * The total number of cells equals ``row_offsets[-1]`` and matches
+      ``begin.size == end.size``.
     """
 
     begin: Any

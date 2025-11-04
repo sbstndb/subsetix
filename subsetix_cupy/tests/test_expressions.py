@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+from typing import Any, Dict, Tuple, Union
 
 from subsetix_cupy import (
     CuPyWorkspace,
@@ -18,6 +19,71 @@ from subsetix_cupy import (
     set_cell,
 )
 from subsetix_cupy.expressions import _REAL_CUPY
+
+
+Spec = Union[str, Tuple]
+
+
+def _cells_from_interval_set(interval_set) -> set[Tuple[int, int]]:
+    cp = _REAL_CUPY
+    assert cp is not None
+    begin = cp.asnumpy(interval_set.begin)
+    end = cp.asnumpy(interval_set.end)
+    offsets = cp.asnumpy(interval_set.row_offsets)
+    rows = cp.asnumpy(interval_set.rows_index())
+    cells: set[Tuple[int, int]] = set()
+    row_count = rows.shape[0]
+    for row_idx in range(row_count):
+        row = int(rows[row_idx])
+        start = offsets[row_idx]
+        stop = offsets[row_idx + 1]
+        for interval_idx in range(start, stop):
+            b = int(begin[interval_idx])
+            e = int(end[interval_idx])
+            cells.update((row, col) for col in range(b, e))
+    return cells
+
+
+def _build_expr_from_spec(spec: Spec, surfaces: Dict[str, Any]):
+    if isinstance(spec, str):
+        return make_input(surfaces[spec])
+    op = spec[0]
+    if op == "complement":
+        universe = _build_expr_from_spec(spec[1], surfaces)
+        subset = _build_expr_from_spec(spec[2], surfaces)
+        return make_complement(universe, subset)
+    lhs = _build_expr_from_spec(spec[1], surfaces)
+    rhs = _build_expr_from_spec(spec[2], surfaces)
+    mapping = {
+        "union": make_union,
+        "difference": make_difference,
+        "intersection": make_intersection,
+        "symmetric_difference": make_symmetric_difference,
+    }
+    if op not in mapping:
+        raise ValueError(f"Unsupported operation {op}")
+    return mapping[op](lhs, rhs)
+
+
+def _apply_operations(spec: Spec, cells_map: Dict[str, set[Tuple[int, int]]]) -> set[Tuple[int, int]]:
+    if isinstance(spec, str):
+        return set(cells_map[spec])
+    op = spec[0]
+    if op == "complement":
+        universe = _apply_operations(spec[1], cells_map)
+        subset = _apply_operations(spec[2], cells_map)
+        return universe - subset
+    lhs = _apply_operations(spec[1], cells_map)
+    rhs = _apply_operations(spec[2], cells_map)
+    if op == "union":
+        return lhs | rhs
+    if op == "difference":
+        return lhs - rhs
+    if op == "intersection":
+        return lhs & rhs
+    if op == "symmetric_difference":
+        return lhs ^ rhs
+    raise ValueError(f"Unsupported operation {op}")
 
 
 @unittest.skipUnless(_REAL_CUPY is not None, "CuPy backend with CUDA required")
@@ -48,6 +114,14 @@ class ExpressionTest(unittest.TestCase):
             begin=[7, 6],
             end=[10, 9],
         )
+        self.surfaces = {
+            "A": self.surface_a,
+            "B": self.surface_b,
+            "C": self.surface_c,
+            "D": self.surface_d,
+            "E": self.surface_e,
+        }
+        self.surface_cells = {name: _cells_from_interval_set(surface) for name, surface in self.surfaces.items()}
 
     def _assert_interval_set(self, result, begin, end, row_offsets, rows=None):
         cp = _REAL_CUPY
@@ -233,6 +307,61 @@ class ExpressionTest(unittest.TestCase):
         np.testing.assert_array_equal(
             cp.asnumpy(result.row_offsets), np.array([0, 1, 3, 4], dtype=np.int32)
         )
+
+    def test_composite_operations_match_cpu_reference(self) -> None:
+        specs = [
+            ("difference", ("union", "A", "B"), "C"),
+            ("union", ("intersection", ("difference", "D", "A"), "B"), ("symmetric_difference", "C", "E")),
+            ("complement", ("union", "D", "E"), ("intersection", "A", "B")),
+        ]
+        for spec in specs:
+            with self.subTest(spec=spec):
+                expr = _build_expr_from_spec(spec, self.surfaces)
+                result = evaluate(expr)
+                gpu_cells = _cells_from_interval_set(result)
+                cpu_cells = _apply_operations(spec, self.surface_cells)
+                self.assertSetEqual(gpu_cells, cpu_cells)
+
+    def test_composite_operations_sparse_rows_match_cpu(self) -> None:
+        sparse_surfaces = {
+            "P": build_interval_set(
+                row_offsets=[0, 1, 2],
+                begin=[1, 3],
+                end=[4, 6],
+                rows=[2, 5],
+            ),
+            "Q": build_interval_set(
+                row_offsets=[0, 2, 3],
+                begin=[0, 5, 1],
+                end=[2, 7, 4],
+                rows=[2, 6],
+            ),
+            "R": build_interval_set(
+                row_offsets=[0, 0, 1],
+                begin=[3],
+                end=[5],
+                rows=[2, 6],
+            ),
+            "U": build_interval_set(
+                row_offsets=[0, 2, 3],
+                begin=[0, 3, 1],
+                end=[6, 8, 6],
+                rows=[2, 6],
+            ),
+        }
+        sparse_cells = {name: _cells_from_interval_set(surface) for name, surface in sparse_surfaces.items()}
+        specs = [
+            ("difference", ("union", "P", "Q"), "R"),
+            ("intersection", ("complement", "U", "P"), ("union", "Q", "R")),
+            ("symmetric_difference", ("difference", "U", "Q"), ("intersection", "P", "R")),
+        ]
+        for spec in specs:
+            with self.subTest(spec=spec):
+                expr = _build_expr_from_spec(spec, sparse_surfaces)
+                result = evaluate(expr)
+                gpu_cells = _cells_from_interval_set(result)
+                cpu_cells = _apply_operations(spec, sparse_cells)
+                self.assertSetEqual(gpu_cells, cpu_cells)
 
 
 @unittest.skipUnless(_REAL_CUPY is not None, "CuPy backend with CUDA required")
