@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Dict, List, Tuple
 
 import cupy as cp
@@ -8,10 +10,14 @@ from .. import (
     IntervalField,
     IntervalSet,
     MultiLevel2D,
+    MultiLevelField2D,
+    create_interval_field,
     evaluate,
+    make_complement,
     make_difference,
     make_input,
     make_intersection,
+    make_symmetric_difference,
     make_union,
     prolong_field,
     prolong_level_field,
@@ -22,10 +28,12 @@ from .. import (
     restrict_level_sets,
     restrict_set,
     step_upwind_interval,
+    locate_interval_cells,
 )
-from ..morphology import dilate_interval_set, erode_interval_set, ghost_zones, clip_interval_set
+from ..morphology import dilate_interval_set, erode_interval_set, ghost_zones, clip_interval_set, full_interval_set
 from ..multilevel import coarse_only, covered_by_fine
-from ..expressions import _require_cupy
+from ..export_vtk import write_unstructured_quads_vtu
+from ..expressions import _require_cupy, _align_interval_sets
 from . import BenchmarkCase, BenchmarkTarget
 from .utils import (
     GeometrySpec,
@@ -33,6 +41,7 @@ from .utils import (
     make_workspace,
     square_grid_interval_set,
     staircase_interval_set,
+    random_interval_set,
 )
 
 SMALL_SPEC = GeometrySpec(rows=256, width=256, tiles_x=3, tiles_y=3, fill_ratio=0.8)
@@ -83,6 +92,15 @@ def _build_expression_case(
     elif op == "difference":
         expr = make_difference(expr_lhs, expr_rhs)
         input_intervals = lhs_total + rhs_total
+    elif op == "symmetric_difference":
+        expr = make_symmetric_difference(expr_lhs, expr_rhs)
+        input_intervals = lhs_total + rhs_total
+    elif op == "complement":
+        universe = full_interval_set(spec.width, spec.rows)
+        expr_universe = make_input(universe)
+        expr = make_complement(expr_universe, expr_lhs)
+        universe_total = int(universe.row_offsets[-1].item())
+        input_intervals = lhs_total + universe_total
     elif op == "chain":
         if expr_extra is None:
             raise RuntimeError("chain operation requires auxiliary geometry")
@@ -176,6 +194,16 @@ def _build_multilevel_case(name: str, description: str, spec: GeometrySpec, op: 
     fine_intervals = int(fine.row_offsets[-1].item())
     base_cells = field_base.cell_count
     fine_cells = field_fine.cell_count
+    ml_base = MultiLevel2D.create(2, base_ratio=RATIO)
+    ml_base.set_level(0, base)
+    ml_full = MultiLevel2D.create(2, base_ratio=RATIO)
+    ml_full.set_level(0, base)
+    ml_full.set_level(1, fine)
+    mf_base = MultiLevelField2D.empty_like(ml_base)
+    mf_base.set_level_field(0, field_base)
+    mf_full = MultiLevelField2D.empty_like(ml_full)
+    mf_full.set_level_field(0, field_base)
+    mf_full.set_level_field(1, field_fine)
 
     def _prolong_set_target():
         prolong_set(base, RATIO)
@@ -201,6 +229,29 @@ def _build_multilevel_case(name: str, description: str, spec: GeometrySpec, op: 
         ml.set_level(1, fine)
         coarse_only(base, ml, 0)
 
+    def _prolong_level_sets_target():
+        ml_base.set_level(0, base)
+        ml_base.set_level(1, None)
+        prolong_level_sets(ml_base, 0)
+
+    def _restrict_level_sets_target():
+        ml_full.set_level(0, base)
+        ml_full.set_level(1, fine)
+        restrict_level_sets(ml_full, 0)
+
+    def _prolong_level_field_target():
+        ml_base.set_level(0, base)
+        mf_base.set_level_field(0, field_base)
+        mf_base.set_level_field(1, None)
+        prolong_level_field(ml_base, mf_base, 0)
+
+    def _restrict_level_field_target():
+        ml_full.set_level(0, base)
+        ml_full.set_level(1, fine)
+        mf_full.set_level_field(0, field_base)
+        mf_full.set_level_field(1, field_fine)
+        restrict_level_field(ml_full, mf_full, 0)
+
     operations = {
         "prolong_set": (_prolong_set_target, {"entity": "IntervalSet", "input_intervals": base_intervals}),
         "restrict_set": (_restrict_set_target, {"entity": "IntervalSet", "input_intervals": fine_intervals}),
@@ -210,6 +261,22 @@ def _build_multilevel_case(name: str, description: str, spec: GeometrySpec, op: 
         "coarse_only": (
             _coarse_only_target,
             {"entity": "IntervalSet", "input_intervals": base_intervals + fine_intervals},
+        ),
+        "prolong_level_sets": (
+            _prolong_level_sets_target,
+            {"entity": "MultiLevel2D", "input_intervals": base_intervals},
+        ),
+        "restrict_level_sets": (
+            _restrict_level_sets_target,
+            {"entity": "MultiLevel2D", "input_intervals": fine_intervals},
+        ),
+        "prolong_level_field": (
+            _prolong_level_field_target,
+            {"entity": "MultiLevelField2D", "input_intervals": base_cells},
+        ),
+        "restrict_level_field": (
+            _restrict_level_field_target,
+            {"entity": "MultiLevelField2D", "input_intervals": fine_cells},
         ),
     }
     if op not in operations:
@@ -227,6 +294,186 @@ def _build_multilevel_case(name: str, description: str, spec: GeometrySpec, op: 
         name=name,
         description=description,
         setup=lambda _cp: BenchmarkTarget(func=func, repeat=40, warmup=5, metadata=metadata),
+    )
+
+
+def _build_align_case(
+    *,
+    name: str,
+    description: str,
+    spec: GeometrySpec,
+) -> BenchmarkCase:
+    cp = _require_cupy()
+    lhs = random_interval_set(
+        cp,
+        rows=spec.rows,
+        width=spec.width,
+        intervals_per_row=(1, max(2, spec.tiles_x * 2)),
+        seed=123,
+    )
+    rhs = random_interval_set(
+        cp,
+        rows=spec.rows,
+        width=spec.width,
+        intervals_per_row=(1, max(2, spec.tiles_x * 3)),
+        seed=987,
+    )
+    lhs_total = int(lhs.row_offsets[-1].item())
+    rhs_total = int(rhs.row_offsets[-1].item())
+    lhs_rows = int(lhs.rows.size)
+    rhs_rows = int(rhs.rows.size)
+
+    def _target():
+        _align_interval_sets(lhs, rhs)
+
+    metadata = {
+        "rows": spec.rows,
+        "width": spec.width,
+        "lhs_rows": lhs_rows,
+        "rhs_rows": rhs_rows,
+        "operation": "align_interval_sets",
+        "input_intervals": lhs_total + rhs_total,
+    }
+
+    return BenchmarkCase(
+        name=name,
+        description=description,
+        setup=lambda _cp: BenchmarkTarget(func=_target, repeat=120, warmup=10, metadata=metadata),
+    )
+
+
+def _build_interval_field_case(
+    *,
+    name: str,
+    description: str,
+    spec: GeometrySpec,
+    op: str,
+) -> BenchmarkCase:
+    cp = _require_cupy()
+    geometry = square_grid_interval_set(cp, spec=spec)
+    interval_count = int(geometry.row_offsets[-1].item())
+
+    if op == "create":
+        def _target():
+            create_interval_field(geometry, fill_value=0.0, dtype=cp.float32)
+
+        metadata = {
+            "rows": spec.rows,
+            "width": spec.width,
+            "operation": "interval_field_create",
+            "input_intervals": interval_count,
+        }
+        return BenchmarkCase(
+            name=name,
+            description=description,
+            setup=lambda _cp: BenchmarkTarget(func=_target, repeat=60, warmup=5, metadata=metadata),
+        )
+
+    if op != "locate":
+        raise ValueError(f"unsupported interval field op '{op}'")
+
+    field = deterministic_interval_field(cp, geometry, width=spec.width)
+    cell_count = field.cell_count
+
+    rows_host = cp.asnumpy(geometry.rows)
+    offsets_host = cp.asnumpy(geometry.row_offsets)
+    begin_host = cp.asnumpy(geometry.begin)
+    end_host = cp.asnumpy(geometry.end)
+    coords: List[Tuple[int, int]] = []
+    max_samples = min(512, cell_count) if cell_count > 0 else 0
+    for ordinal, row_value in enumerate(rows_host):
+        start = int(offsets_host[ordinal])
+        stop = int(offsets_host[ordinal + 1])
+        for idx in range(start, stop):
+            x0 = int(begin_host[idx])
+            x1 = int(end_host[idx])
+            for x in range(x0, x1):
+                coords.append((int(row_value), int(x)))
+                if len(coords) >= max_samples:
+                    break
+            if len(coords) >= max_samples:
+                break
+        if len(coords) >= max_samples:
+            break
+
+    if not coords:
+        raise ValueError("interval_field benchmark requires at least one active cell")
+
+    rows_list = [row for row, _ in coords]
+    cols_list = [col for _, col in coords]
+    sample_count = len(rows_list)
+    query_rows = cp.asarray(rows_list, dtype=cp.int32)
+    query_cols = cp.asarray(cols_list, dtype=cp.int32)
+    scratch = cp.empty(sample_count, dtype=cp.int32)
+
+    def _target_search():
+        locate_interval_cells(field, query_rows, query_cols, out=scratch)
+
+    metadata = {
+        "rows": spec.rows,
+        "width": spec.width,
+        "operation": "interval_field_locate",
+        "input_intervals": sample_count,
+        "samples": sample_count,
+    }
+    return BenchmarkCase(
+        name=name,
+        description=description,
+        setup=lambda _cp: BenchmarkTarget(func=_target_search, repeat=120, warmup=15, metadata=metadata),
+    )
+
+
+def _build_vtu_case(
+    *,
+    name: str,
+    description: str,
+    spec: GeometrySpec,
+) -> BenchmarkCase:
+    cp = _require_cupy()
+    base_set = square_grid_interval_set(cp, spec=spec)
+    base_field = deterministic_interval_field(cp, base_set, width=spec.width)
+    ratio = RATIO
+    fine_set = prolong_set(base_set, ratio)
+    fine_field = prolong_field(base_field, ratio)
+    fine_width = max(1, spec.width * ratio)
+    fine_rows = max(1, spec.rows * ratio)
+    ghost_set = ghost_zones(fine_set, halo_x=1, halo_y=1, width=fine_width, height=fine_rows)
+    ghost_field = create_interval_field(ghost_set, fill_value=-1.0, dtype=cp.float32)
+    if ghost_field.values.size:
+        ghost_field.values.fill(-1.0)
+
+    dx0 = 1.0 / max(1, spec.width)
+    dy0 = 1.0 / max(1, spec.rows)
+    dx1 = dx0 / ratio
+    dy1 = dy0 / ratio
+
+    total_cells = base_field.cell_count + fine_field.cell_count + ghost_field.cell_count
+    out_dir = os.path.join(tempfile.gettempdir(), "subsetix_bench_vtu")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{name}.vtu")
+
+    cells = [
+        (base_field, 0, dx0, dy0, 0.0, 0.0, 0),
+        (fine_field, 1, dx1, dy1, 0.0, 0.0, 0),
+        (ghost_field, 1, dx1, dy1, 0.0, 0.0, 1),
+    ]
+
+    def _target():
+        write_unstructured_quads_vtu(path, cells)
+        cp.cuda.runtime.deviceSynchronize()
+
+    metadata = {
+        "rows": spec.rows,
+        "width": spec.width,
+        "levels": 2,
+        "operation": "write_unstructured_quads_vtu",
+        "input_intervals": total_cells,
+    }
+
+    return BenchmarkCase(
+        name=name,
+        description=description,
+        setup=lambda _cp: BenchmarkTarget(func=_target, repeat=12, warmup=3, metadata=metadata),
     )
 
 
@@ -336,6 +583,40 @@ _CASES: List[BenchmarkCase] = [
         spec=LARGE_SPEC,
         op="difference",
     ),
+    _build_expression_case(
+        name="expr_symmetric_difference_small",
+        description="Interval symmetric difference (small domain)",
+        spec=SMALL_SPEC,
+        op="symmetric_difference",
+    ),
+    _build_expression_case(
+        name="expr_symmetric_difference_large",
+        description="Interval symmetric difference (large domain)",
+        spec=LARGE_SPEC,
+        op="symmetric_difference",
+    ),
+    _build_expression_case(
+        name="expr_complement_small",
+        description="Interval complement inside full domain (small)",
+        spec=SMALL_SPEC,
+        op="complement",
+    ),
+    _build_expression_case(
+        name="expr_complement_large",
+        description="Interval complement inside full domain (large)",
+        spec=LARGE_SPEC,
+        op="complement",
+    ),
+    _build_align_case(
+        name="expr_align_small",
+        description="Row alignment of random interval sets (small domain)",
+        spec=SMALL_SPEC,
+    ),
+    _build_align_case(
+        name="expr_align_large",
+        description="Row alignment of random interval sets (large domain)",
+        spec=LARGE_SPEC,
+    ),
     _build_morph_case(
         name="morph_dilate_small",
         description="Morphological dilation (small domain)",
@@ -383,6 +664,30 @@ _CASES: List[BenchmarkCase] = [
         halo_x=2,
         halo_y=2,
         op="erode",
+    ),
+    _build_interval_field_case(
+        name="interval_field_create_small",
+        description="IntervalField creation (small domain)",
+        spec=SMALL_SPEC,
+        op="create",
+    ),
+    _build_interval_field_case(
+        name="interval_field_create_large",
+        description="IntervalField creation (large domain)",
+        spec=LARGE_SPEC,
+        op="create",
+    ),
+    _build_interval_field_case(
+        name="interval_field_locate_small",
+        description="IntervalField locate-only queries (small domain)",
+        spec=SMALL_SPEC,
+        op="locate",
+    ),
+    _build_interval_field_case(
+        name="interval_field_locate_large",
+        description="IntervalField locate-only queries (large domain)",
+        spec=LARGE_SPEC,
+        op="locate",
     ),
     _build_multilevel_case(
         name="multilevel_prolong_set_small",
@@ -455,6 +760,64 @@ _CASES: List[BenchmarkCase] = [
         description="Coarse-only derivation (large domain)",
         spec=LARGE_SPEC,
         op="coarse_only",
+    ),
+    _build_multilevel_case(
+        name="multilevel_prolong_level_sets_small",
+        description="Level-aware prolongation of sets (small domain)",
+        spec=SMALL_SPEC,
+        op="prolong_level_sets",
+    ),
+    _build_multilevel_case(
+        name="multilevel_prolong_level_sets_large",
+        description="Level-aware prolongation of sets (large domain)",
+        spec=LARGE_SPEC,
+        op="prolong_level_sets",
+    ),
+    _build_multilevel_case(
+        name="multilevel_restrict_level_sets_small",
+        description="Level-aware restriction of sets (small domain)",
+        spec=SMALL_SPEC,
+        op="restrict_level_sets",
+    ),
+    _build_multilevel_case(
+        name="multilevel_restrict_level_sets_large",
+        description="Level-aware restriction of sets (large domain)",
+        spec=LARGE_SPEC,
+        op="restrict_level_sets",
+    ),
+    _build_multilevel_case(
+        name="multilevel_prolong_level_field_small",
+        description="Level-aware prolongation of fields (small domain)",
+        spec=SMALL_SPEC,
+        op="prolong_level_field",
+    ),
+    _build_multilevel_case(
+        name="multilevel_prolong_level_field_large",
+        description="Level-aware prolongation of fields (large domain)",
+        spec=LARGE_SPEC,
+        op="prolong_level_field",
+    ),
+    _build_multilevel_case(
+        name="multilevel_restrict_level_field_small",
+        description="Level-aware restriction of fields (small domain)",
+        spec=SMALL_SPEC,
+        op="restrict_level_field",
+    ),
+    _build_multilevel_case(
+        name="multilevel_restrict_level_field_large",
+        description="Level-aware restriction of fields (large domain)",
+        spec=LARGE_SPEC,
+        op="restrict_level_field",
+    ),
+    _build_vtu_case(
+        name="export_vtu_small",
+        description="VTU export pipeline (small intervals)",
+        spec=STENCIL_SMALL,
+    ),
+    _build_vtu_case(
+        name="export_vtu_large",
+        description="VTU export pipeline (large intervals)",
+        spec=STENCIL_LARGE,
     ),
     _build_stencil_case(
         name="stencil_interval_square_small",

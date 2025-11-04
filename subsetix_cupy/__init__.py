@@ -13,7 +13,7 @@ from .expressions import (
     make_symmetric_difference,
     make_union,
 )
-from .interval_field import IntervalField, create_interval_field, get_cell, set_cell
+from .interval_field import IntervalField, create_interval_field, get_cell, set_cell, locate_interval_cells
 from .multilevel import (
     MultiLevel2D,
     MultiLevelField2D,
@@ -60,6 +60,7 @@ __all__ = [
     "create_interval_field",
     "get_cell",
     "set_cell",
+    "locate_interval_cells",
     "MultiLevel2D",
     "MultiLevelField2D",
     "prolong_set",
