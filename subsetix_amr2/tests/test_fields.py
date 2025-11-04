@@ -3,9 +3,6 @@ import unittest
 from subsetix_amr2.fields import (
     Action,
     ActionField,
-    prolong_coarse_to_fine,
-    restrict_fine_to_coarse,
-    synchronize_two_level,
     synchronize_interval_fields,
     gather_interval_subset,
     scatter_interval_subset,
@@ -58,40 +55,7 @@ class FieldsTest(unittest.TestCase):
         expected = self.cp.full((height, width), int(Action.KEEP), dtype=self.cp.int8)
         self.cp.testing.assert_array_equal(grid, expected)
 
-    def test_prolong_restrict_inverse(self) -> None:
-        coarse = self.cp.arange(16, dtype=self.cp.float32).reshape(4, 4)
-        fine = prolong_coarse_to_fine(coarse, 2)
-        self.assertEqual(fine.shape, (8, 8))
-        restored = restrict_fine_to_coarse(fine, 2)
-        self.cp.testing.assert_array_equal(restored, coarse)
-
-    def test_prolong_with_interval_subset(self) -> None:
-        coarse = self.cp.arange(4, dtype=self.cp.float32).reshape(2, 2)
-        intervals = _make_interval_set(
-            self.cp,
-            4,
-            {
-                0: [(0, 1), (2, 3)],
-                2: [(0, 1), (2, 3)],
-            },
-        )
-        out = self.cp.full((4, 4), -1.0, dtype=self.cp.float32)
-        prolong_coarse_to_fine(coarse, 2, out=out, mask=intervals)
-        expected = self.cp.full((4, 4), -1.0, dtype=self.cp.float32)
-        expected[0, 0] = 0.0
-        expected[0, 2] = 1.0
-        expected[2, 0] = 2.0
-        expected[2, 2] = 3.0
-        self.cp.testing.assert_array_equal(out, expected)
-
-    def test_restrict_reducer(self) -> None:
-        fine = self.cp.ones((4, 4), dtype=self.cp.float32)
-        fine[::2, ::2] = 3.0
-        coarse_sum = restrict_fine_to_coarse(fine, 2, reducer="sum")
-        expected = self.cp.full((2, 2), 6.0, dtype=self.cp.float32)
-        self.cp.testing.assert_array_equal(coarse_sum, expected)
-
-    def test_synchronize_round(self) -> None:
+    def test_synchronize_interval_fields_copy_and_fill(self) -> None:
         coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
         fine = self.cp.full((8, 8), 2.0, dtype=self.cp.float32)
         refine = _make_interval_set(
@@ -101,111 +65,6 @@ class FieldsTest(unittest.TestCase):
                 1: [(1, 3)],
                 2: [(1, 3)],
             },
-        )
-        coarse_updated, fine_updated = synchronize_two_level(
-            coarse,
-            fine,
-            refine,
-            ratio=2,
-            reducer="mean",
-            fill_fine_outside=True,
-        )
-
-        expected_coarse = self.cp.zeros_like(coarse)
-        expected_coarse[1:3, 1:3] = 2.0
-        self.cp.testing.assert_array_equal(coarse_updated, expected_coarse)
-
-        actions = ActionField.full_grid(4, 4, ratio=2)
-        actions.set_from_interval_set(refine)
-        fine_set = actions.fine_set()
-        fine_cells = set()
-        begin = fine_set.begin.get()
-        end = fine_set.end.get()
-        offsets = fine_set.row_offsets.get()
-        fine_height = offsets.size - 1
-        for row in range(fine_height):
-            start = int(offsets[row])
-            stop = int(offsets[row + 1])
-            for idx in range(start, stop):
-                for col in range(int(begin[idx]), int(end[idx])):
-                    fine_cells.add((row, col))
-        for row, col in fine_cells:
-            self.assertEqual(float(fine_updated[row, col]), 2.0)
-        for row in range(fine.shape[0]):
-            for col in range(fine.shape[1]):
-                if (row, col) not in fine_cells:
-                    self.assertEqual(float(fine_updated[row, col]), 0.0)
-
-    def test_synchronize_without_fill(self) -> None:
-        coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
-        fine = self.cp.arange(64, dtype=self.cp.float32).reshape(8, 8)
-        refine = _make_interval_set(
-            self.cp,
-            4,
-            {
-                1: [(1, 3)],
-                2: [(1, 3)],
-            },
-        )
-        coarse_updated, fine_updated = synchronize_two_level(
-            coarse,
-            fine,
-            refine,
-            ratio=2,
-            reducer="mean",
-            fill_fine_outside=False,
-        )
-        self.assertEqual(coarse_updated.dtype, self.cp.float32)
-        self.cp.testing.assert_array_equal(fine_updated, fine)
-
-    def test_synchronize_in_place(self) -> None:
-        coarse = self.cp.zeros((2, 2), dtype=self.cp.float32)
-        fine = self.cp.full((4, 4), 2.0, dtype=self.cp.float32)
-        refine = _make_interval_set(
-            self.cp,
-            2,
-            {
-                0: [(0, 1)],
-                1: [(0, 1)],
-            },
-        )
-        coarse_out, fine_out = synchronize_two_level(
-            coarse,
-            fine,
-            refine,
-            ratio=2,
-            reducer="mean",
-            fill_fine_outside=True,
-            copy=False,
-        )
-        self.assertIs(coarse_out, coarse)
-        self.assertIs(fine_out, fine)
-        expected_coarse = self.cp.array([[2.0, 0.0], [2.0, 0.0]], dtype=self.cp.float32)
-        self.cp.testing.assert_array_equal(coarse, expected_coarse)
-        # refined block remains 2.0, rest filled from coarse (zeros)
-        self.assertTrue(self.cp.all(fine[0:2, 0:2] == 2.0))
-        self.assertTrue(self.cp.all(fine[2:, :2] == 2.0))
-        self.assertTrue(self.cp.all(fine[:, 2:] == 0.0))
-
-    def test_synchronize_interval_matches_dense(self) -> None:
-        coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
-        fine = self.cp.full((8, 8), 2.0, dtype=self.cp.float32)
-        refine = _make_interval_set(
-            self.cp,
-            4,
-            {
-                1: [(1, 3)],
-                2: [(1, 3)],
-            },
-        )
-
-        dense_coarse, dense_fine = synchronize_two_level(
-            coarse,
-            fine,
-            refine,
-            ratio=2,
-            reducer="mean",
-            fill_fine_outside=True,
         )
 
         actions = ActionField.full_grid(4, 4, ratio=2)
@@ -224,34 +83,67 @@ class FieldsTest(unittest.TestCase):
             copy=True,
         )
 
-        coarse_dense_from_interval = interval_field_to_dense(coarse_sync, width=4, height=4, fill_value=0.0)
-        fine_dense_from_interval = interval_field_to_dense(fine_sync, width=8, height=8, fill_value=0.0)
+        coarse_dense = interval_field_to_dense(coarse_sync, width=4, height=4, fill_value=0.0)
+        fine_dense = interval_field_to_dense(fine_sync, width=8, height=8, fill_value=0.0)
 
-        self.cp.testing.assert_allclose(dense_coarse, coarse_dense_from_interval)
-        self.cp.testing.assert_allclose(dense_fine, fine_dense_from_interval)
+        expected_coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
+        expected_coarse[1:3, 1:3] = 2.0
+        self.cp.testing.assert_array_equal(coarse_dense, expected_coarse)
 
-        coarse_original = interval_field_to_dense(coarse_field, width=4, height=4, fill_value=0.0)
-        fine_original = interval_field_to_dense(fine_field, width=8, height=8, fill_value=0.0)
-        self.cp.testing.assert_array_equal(coarse_original, coarse)
-        self.cp.testing.assert_array_equal(fine_original, fine)
+        expected_fine = self.cp.zeros((8, 8), dtype=self.cp.float32)
+        expected_fine[2:6, 2:6] = 2.0
+        self.cp.testing.assert_array_equal(fine_dense, expected_fine)
 
-        coarse_field_inplace = self._full_field(coarse)
-        fine_field_inplace = self._full_field(fine)
+        # original buffers untouched in copy=True mode
+        self.cp.testing.assert_array_equal(interval_field_to_dense(coarse_field, width=4, height=4, fill_value=0.0), coarse)
+        self.cp.testing.assert_array_equal(interval_field_to_dense(fine_field, width=8, height=8, fill_value=0.0), fine)
+
+    def test_synchronize_interval_fields_inplace_and_no_fill(self) -> None:
+        coarse = self.cp.zeros((2, 2), dtype=self.cp.float32)
+        fine = self.cp.arange(16, dtype=self.cp.float32).reshape(4, 4)
+        refine = _make_interval_set(
+            self.cp,
+            2,
+            {
+                0: [(0, 1)],
+                1: [(0, 1)],
+            },
+        )
+
+        actions = ActionField.full_grid(2, 2, ratio=2)
+        actions.set_from_interval_set(refine)
+
+        coarse_field = self._full_field(coarse)
+        fine_field = self._full_field(fine)
+
         coarse_res, fine_res = synchronize_interval_fields(
-            coarse_field_inplace,
-            fine_field_inplace,
+            coarse_field,
+            fine_field,
             actions,
             ratio=2,
             reducer="mean",
-            fill_fine_outside=True,
+            fill_fine_outside=False,
             copy=False,
         )
-        self.assertIs(coarse_res, coarse_field_inplace)
-        self.assertIs(fine_res, fine_field_inplace)
-        coarse_inplace_dense = interval_field_to_dense(coarse_res, width=4, height=4, fill_value=0.0)
-        fine_inplace_dense = interval_field_to_dense(fine_res, width=8, height=8, fill_value=0.0)
-        self.cp.testing.assert_allclose(dense_coarse, coarse_inplace_dense)
-        self.cp.testing.assert_allclose(dense_fine, fine_inplace_dense)
+
+        self.assertIs(coarse_res, coarse_field)
+        self.assertIs(fine_res, fine_field)
+
+        coarse_dense = interval_field_to_dense(coarse_res, width=2, height=2, fill_value=0.0)
+        expected_coarse = self.cp.zeros((2, 2), dtype=self.cp.float32)
+        expected_coarse[0, 0] = fine[0:2, 0:2].mean()
+        expected_coarse[1, 0] = fine[2:4, 0:2].mean()
+        self.cp.testing.assert_allclose(coarse_dense, expected_coarse)
+
+        fine_dense = interval_field_to_dense(fine_res, width=4, height=4, fill_value=0.0)
+        self.cp.testing.assert_array_equal(fine_dense, fine)
+
+    def test_synchronize_interval_fields_invalid_ratio(self) -> None:
+        coarse = self._full_field(self.cp.zeros((2, 2), dtype=self.cp.float32))
+        fine = self._full_field(self.cp.zeros((4, 4), dtype=self.cp.float32))
+        actions = ActionField.full_grid(2, 2, ratio=2)
+        with self.assertRaises(ValueError):
+            synchronize_interval_fields(coarse, fine, actions, ratio=3)
 
     def test_gather_scatter_interval_subset(self) -> None:
         data = self.cp.arange(12, dtype=self.cp.float32).reshape(3, 4)
@@ -280,16 +172,3 @@ class FieldsTest(unittest.TestCase):
         scatter_interval_subset(target, subset_field)
         target_dense = interval_field_to_dense(target, width=4, height=3, fill_value=0.0)
         self.cp.testing.assert_array_equal(target_dense, expected)
-
-    def test_synchronize_height_mismatch(self) -> None:
-        coarse = self.cp.zeros((4, 4), dtype=self.cp.float32)
-        fine = self.cp.zeros((8, 8), dtype=self.cp.float32)
-        refine = _make_interval_set(
-            self.cp,
-            2,
-            {
-                0: [(0, 1)],
-            },
-        )
-        with self.assertRaises(ValueError):
-            synchronize_two_level(coarse, fine, refine, ratio=2)

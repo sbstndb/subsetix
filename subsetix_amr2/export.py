@@ -15,18 +15,13 @@ from subsetix_cupy.expressions import (
 from subsetix_cupy.interval_field import IntervalField
 from subsetix_cupy.morphology import ghost_zones
 
-from .fields import gather_interval_subset, interval_field_from_dense
+from .fields import gather_interval_subset
 
 
 def _as_interval_field(field, *, name: str) -> IntervalField:
-    cp_mod = _require_cupy()
     if isinstance(field, IntervalField):
         return field
-    if not isinstance(field, cp_mod.ndarray):
-        raise TypeError(f"{name} must be an IntervalField or CuPy array")
-    if field.ndim != 2:
-        raise ValueError(f"{name} must be a 2D array")
-    return interval_field_from_dense(field)
+    raise TypeError(f"{name} must be an IntervalField")
 
 
 def _interval_dimensions(field: IntervalField) -> Tuple[int, int]:

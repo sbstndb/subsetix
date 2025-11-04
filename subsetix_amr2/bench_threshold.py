@@ -25,6 +25,8 @@ from subsetix_amr2.regrid import (
     _require_cupy,
     gradient_tag_threshold_set,
 )
+from subsetix_cupy.interval_field import create_interval_field
+from subsetix_cupy.morphology import full_interval_set
 
 
 def _format_stats(values):
@@ -103,8 +105,11 @@ def run_benchmark(size: int, iterations: int, threshold: float, seed: int | None
         cp.random.seed(seed)
 
     data = cp.random.random((size, size), dtype=cp.float32)
+    interval = full_interval_set(size, size)
+    field = create_interval_field(interval, fill_value=0.0, dtype=cp.float32)
+    field.values[...] = data.ravel()
     # Warm-up to avoid measuring initial JIT/kernel setup.
-    gradient_tag_threshold_set(data, threshold)
+    gradient_tag_threshold_set(field, width=size, height=size, threshold=threshold)
     cp.cuda.runtime.deviceSynchronize()
 
     combined_times = []
@@ -117,7 +122,7 @@ def run_benchmark(size: int, iterations: int, threshold: float, seed: int | None
 
     for _ in range(iterations):
         t = time.perf_counter()
-        gradient_tag_threshold_set(data, threshold)
+        gradient_tag_threshold_set(field, width=size, height=size, threshold=threshold)
         cp.cuda.runtime.deviceSynchronize()
         tag_times.append(time.perf_counter() - t)
 

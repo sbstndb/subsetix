@@ -6,6 +6,8 @@ from subsetix_amr2.export import save_two_level_vtk
 from subsetix_amr2.fields import ActionField, Action
 from subsetix_amr2.geometry import TwoLevelGeometry
 from subsetix_cupy.expressions import IntervalSet, _REAL_CUPY
+from subsetix_cupy.interval_field import create_interval_field
+from subsetix_cupy.morphology import full_interval_set
 
 
 def _make_interval_set(cp_mod, height, spans):
@@ -22,6 +24,14 @@ def _make_interval_set(cp_mod, height, spans):
     end_arr = cp_mod.asarray(ends, dtype=cp_mod.int32)
     offsets_arr = cp_mod.asarray(row_offsets, dtype=cp_mod.int32)
     return IntervalSet(begin=begin_arr, end=end_arr, row_offsets=offsets_arr)
+
+
+def _field_from_array(cp_mod, array):
+    height, width = array.shape
+    interval = full_interval_set(width, height)
+    field = create_interval_field(interval, fill_value=0.0, dtype=array.dtype)
+    field.values[...] = array.ravel()
+    return field
 
 
 @unittest.skipUnless(_REAL_CUPY is not None, "CuPy backend with CUDA required")
@@ -48,14 +58,16 @@ class ExportTest(unittest.TestCase):
 
         ratio = 2
         fine = cp.full((8, 8), 2.0, dtype=cp.float32)
+        coarse_field = _field_from_array(cp, coarse)
+        fine_field = _field_from_array(cp, fine)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             files = save_two_level_vtk(
                 tmpdir,
                 "demo",
                 5,
-                coarse_field=coarse,
-                fine_field=fine,
+                coarse_field=coarse_field,
+                fine_field=fine_field,
                 refine_set=refine_set,
                 coarse_only_set=coarse_only_set,
                 fine_set=fine_set,

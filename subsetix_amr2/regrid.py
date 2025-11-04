@@ -229,52 +229,6 @@ def _empty_interval_set(rows: int) -> IntervalSet:
     return IntervalSet(begin=zero, end=zero, row_offsets=offsets)
 
 
-def _intervals_above_threshold(
-    data: cp.ndarray,
-    threshold: float,
-) -> IntervalSet:
-    cp_mod = _require_cupy()
-    if data.ndim != 2:
-        raise ValueError("data must be 2D")
-    rows, width = data.shape
-    if rows == 0 or width == 0:
-        return _empty_interval_set(rows)
-
-    counts = cp_mod.zeros(rows, dtype=cp_mod.int32)
-    _COUNT_INTERVALS(
-        (rows,),
-        (32,),
-        (
-            data,
-            cp_mod.int32(rows),
-            cp_mod.int32(width),
-            cp_mod.float32(threshold),
-            counts,
-        ),
-    )
-    row_offsets = cp_mod.empty(rows + 1, dtype=cp_mod.int32)
-    row_offsets[0] = 0
-    cp_mod.cumsum(counts, dtype=cp_mod.int32, out=row_offsets[1:])
-    total = int(row_offsets[-1].item()) if rows > 0 else 0
-    begin = cp_mod.empty(total, dtype=cp_mod.int32)
-    end = cp_mod.empty_like(begin)
-    if total > 0:
-        _WRITE_INTERVALS(
-            (rows,),
-            (32,),
-            (
-                data,
-                cp_mod.int32(rows),
-                cp_mod.int32(width),
-                cp_mod.float32(threshold),
-                row_offsets,
-                begin,
-                end,
-            ),
-        )
-    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
-
-
 def gradient_magnitude_interval_field(
     field: IntervalField,
     *,
@@ -394,84 +348,55 @@ def gradient_tag_threshold_interval_field(
     )
 
 
-def gradient_magnitude(field: cp.ndarray) -> cp.ndarray:
-    """
-    Return sqrt((du/dx)^2 + (du/dy)^2) using first-order differences.
-    """
-
-    cp_mod = _require_cupy()
-    data = cp_mod.asarray(field, dtype=cp_mod.float32)
-    if data.ndim != 2:
-        raise ValueError("field must be a 2D array")
-    rows, width = data.shape
-    if rows == 0 or width == 0:
-        return cp_mod.zeros_like(data)
-    out = cp_mod.empty_like(data)
-    block = (32, 8)
-    grid = (
-        (width + block[0] - 1) // block[0],
-        (rows + block[1] - 1) // block[1],
-    )
-    _GRADIENT_MAGNITUDE_KERNEL(
-        grid,
-        block,
-        (
-            data,
-            cp_mod.int32(rows),
-            cp_mod.int32(width),
-            out,
-        ),
-    )
-    return out
-
-
 def gradient_tag_set(
-    values: cp.ndarray,
-    frac_high: float,
+    field: IntervalField,
     *,
+    width: int,
+    height: int,
+    frac_high: float,
     epsilon: float = 1e-8,
 ) -> IntervalSet:
-    """Tag the top ``frac_high`` fraction of gradients as an IntervalSet."""
+    """Tag the top ``frac_high`` fraction of scalar values as an IntervalSet."""
 
     cp_mod = _require_cupy()
-    data = cp_mod.asarray(values, dtype=cp_mod.float32)
-    if data.ndim != 2:
-        raise ValueError("values must be a 2D array")
-    rows = data.shape[0]
     frac_high = float(max(0.0, min(1.0, frac_high)))
-    if data.size == 0 or frac_high <= 0.0:
-        return _empty_interval_set(rows)
+    if frac_high <= 0.0:
+        return _empty_interval_set(height)
 
-    flat = data.ravel()
-    positive = flat[flat > float(epsilon)]
+    values = field.values.astype(cp_mod.float32, copy=False)
+    positive = values[values > cp_mod.float32(epsilon)]
     if positive.size == 0:
-        return _empty_interval_set(rows)
+        return _empty_interval_set(height)
 
     count = int(cp_mod.ceil(positive.size * frac_high))
     count = max(1, min(int(positive.size), count))
     idx = int(positive.size) - count
     part = cp_mod.partition(positive, idx)
-    threshold = max(float(part[idx]), float(epsilon))
-    return _intervals_above_threshold(data, threshold)
+    threshold = float(part[idx])
+    return intervals_above_threshold_interval_field(
+        field,
+        width=width,
+        height=height,
+        threshold=max(threshold, float(epsilon)),
+    )
 
 
 def gradient_tag_threshold_set(
-    values: cp.ndarray,
-    threshold: float,
+    field: IntervalField,
     *,
+    width: int,
+    height: int,
+    threshold: float,
     epsilon: float = 1e-8,
 ) -> IntervalSet:
-    """Tag gradients above ``threshold`` as an IntervalSet."""
+    """Tag values above ``threshold`` as an IntervalSet."""
 
-    cp_mod = _require_cupy()
-    data = cp_mod.asarray(values, dtype=cp_mod.float32)
-    if data.ndim != 2:
-        raise ValueError("values must be a 2D array")
-    rows = data.shape[0]
-    if data.size == 0:
-        return _empty_interval_set(rows)
-    thresh = max(float(threshold), float(epsilon))
-    return _intervals_above_threshold(data, thresh)
+    return intervals_above_threshold_interval_field(
+        field,
+        width=width,
+        height=height,
+        threshold=max(float(threshold), float(epsilon)),
+    )
 
 
 def enforce_two_level_grading_set(

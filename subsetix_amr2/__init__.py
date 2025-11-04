@@ -8,17 +8,11 @@ set operations implemented in :mod:`subsetix_cupy`.
 
 from .geometry import TwoLevelGeometry, mask_to_interval_set, interval_set_to_mask
 from .regrid import (
-    gradient_magnitude,
     gradient_tag_threshold_set,
     gradient_tag_set,
     enforce_two_level_grading_set,
 )
-from .fields import (
-    prolong_coarse_to_fine,
-    restrict_fine_to_coarse,
-    synchronize_two_level,
-    synchronize_interval_fields,
-)
+from .fields import synchronize_interval_fields
 from .export import save_two_level_vtk
 from .api import Box, MRAdaptor, TwoLevelMesh, make_scalar_field
 from .runner import (
@@ -44,13 +38,9 @@ __all__ = [
     "TwoLevelGeometry",
     "mask_to_interval_set",
     "interval_set_to_mask",
-    "gradient_magnitude",
     "gradient_tag_set",
     "gradient_tag_threshold_set",
     "enforce_two_level_grading_set",
-    "prolong_coarse_to_fine",
-    "restrict_fine_to_coarse",
-    "synchronize_two_level",
     "synchronize_interval_fields",
     "save_two_level_vtk",
     "Box",

@@ -17,8 +17,9 @@ from statistics import mean, stdev
 
 import cupy as cp
 
-from subsetix_amr2.fields import interval_field_from_dense
+from subsetix_cupy.interval_field import create_interval_field
 from subsetix_cupy.interval_stencil import step_upwind_interval
+from subsetix_cupy.morphology import full_interval_set
 
 
 def _format(values):
@@ -89,8 +90,14 @@ def benchmark(size: int, ratio: int, iterations: int, seed: int | None):
 
     coarse = cp.random.random((size, size), dtype=cp.float32)
     fine = cp.random.random((size * ratio, size * ratio), dtype=cp.float32)
-    coarse_field = interval_field_from_dense(coarse)
-    fine_field = interval_field_from_dense(fine)
+
+    coarse_interval = full_interval_set(size, size)
+    coarse_field = create_interval_field(coarse_interval, fill_value=0.0, dtype=cp.float32)
+    coarse_field.values[...] = coarse.ravel()
+
+    fine_interval = full_interval_set(size * ratio, size * ratio)
+    fine_field = create_interval_field(fine_interval, fill_value=0.0, dtype=cp.float32)
+    fine_field.values[...] = fine.ravel()
     coarse_out = cp.empty_like(coarse_field.values)
     fine_out = cp.empty_like(fine_field.values)
 

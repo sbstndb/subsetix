@@ -2,11 +2,12 @@ import unittest
 
 from subsetix_amr2.regrid import (
     enforce_two_level_grading_set,
-    gradient_magnitude,
     gradient_tag_threshold_set,
     gradient_tag_set,
 )
 from subsetix_cupy.expressions import IntervalSet, _REAL_CUPY
+from subsetix_cupy.interval_field import create_interval_field
+from subsetix_cupy.morphology import full_interval_set
 
 
 def _make_interval_set(cp_mod, height, spans):
@@ -31,6 +32,14 @@ def _empty_interval_set(cp_mod, height):
     return IntervalSet(begin=zeros, end=zeros, row_offsets=offsets)
 
 
+def _field_from_array(cp_mod, array):
+    height, width = array.shape
+    interval = full_interval_set(width, height)
+    field = create_interval_field(interval, fill_value=0.0, dtype=array.dtype)
+    field.values[...] = array.ravel()
+    return field
+
+
 def _assert_interval_equal(testcase, cp_mod, actual: IntervalSet, expected: IntervalSet):
     testcase.assertEqual(actual.row_offsets.size, expected.row_offsets.size)
     cp_mod.testing.assert_array_equal(actual.row_offsets, expected.row_offsets)
@@ -43,23 +52,19 @@ class RegridTest(unittest.TestCase):
     def setUp(self) -> None:
         self.cp = _REAL_CUPY
 
-    def test_gradient_magnitude(self) -> None:
-        data = self.cp.arange(16, dtype=self.cp.float32).reshape(4, 4)
-        grad = gradient_magnitude(data)
-        self.assertEqual(grad.shape, data.shape)
-        self.assertTrue(self.cp.all(grad >= 0))
-
     def test_gradient_tag_percentile(self) -> None:
         data = self.cp.zeros((4, 4), dtype=self.cp.float32)
         data[1, 1] = 0.5
         data[2, 2] = 1.0
-        tagged_set = gradient_tag_set(data, frac_high=0.5)
+        field = _field_from_array(self.cp, data)
+        tagged_set = gradient_tag_set(field, width=4, height=4, frac_high=0.5)
         expected = _make_interval_set(self.cp, 4, {2: [(2, 3)]})
         _assert_interval_equal(self, self.cp, tagged_set, expected)
 
     def test_gradient_tag_all_zero(self) -> None:
         data = self.cp.zeros((4, 4), dtype=self.cp.float32)
-        tagged_set = gradient_tag_set(data, frac_high=0.2)
+        field = _field_from_array(self.cp, data)
+        tagged_set = gradient_tag_set(field, width=4, height=4, frac_high=0.2)
         expected = _empty_interval_set(self.cp, 4)
         _assert_interval_equal(self, self.cp, tagged_set, expected)
 
@@ -67,14 +72,16 @@ class RegridTest(unittest.TestCase):
         data = self.cp.zeros((4, 4), dtype=self.cp.float32)
         data[1, 1] = 0.5
         data[2, 2] = 1.0
-        tagged_set = gradient_tag_threshold_set(data, threshold=0.75)
+        field = _field_from_array(self.cp, data)
+        tagged_set = gradient_tag_threshold_set(field, width=4, height=4, threshold=0.75)
         expected = _make_interval_set(self.cp, 4, {2: [(2, 3)]})
         _assert_interval_equal(self, self.cp, tagged_set, expected)
 
     def test_gradient_tag_threshold_single_column(self) -> None:
         data = self.cp.asarray([[0.0], [0.3], [0.6], [1.0]], dtype=self.cp.float32)
         threshold = 0.25
-        tagged_set = gradient_tag_threshold_set(data, threshold=threshold)
+        field = _field_from_array(self.cp, data)
+        tagged_set = gradient_tag_threshold_set(field, width=1, height=4, threshold=threshold)
         expected = _make_interval_set(
             self.cp,
             4,
@@ -88,7 +95,8 @@ class RegridTest(unittest.TestCase):
 
     def test_gradient_tag_custom_epsilon(self) -> None:
         data = self.cp.full((4, 4), 1e-9, dtype=self.cp.float32)
-        tagged_set = gradient_tag_set(data, frac_high=0.2, epsilon=1e-8)
+        field = _field_from_array(self.cp, data)
+        tagged_set = gradient_tag_set(field, width=4, height=4, frac_high=0.2, epsilon=1e-8)
         expected = _empty_interval_set(self.cp, 4)
         _assert_interval_equal(self, self.cp, tagged_set, expected)
 

@@ -17,7 +17,8 @@ from subsetix_amr2.regrid import (
     gradient_tag_threshold_set,
 )
 from subsetix_cupy import evaluate, make_input, make_union
-from subsetix_cupy.morphology import dilate_interval_set, clip_interval_set
+from subsetix_cupy.interval_field import create_interval_field
+from subsetix_cupy.morphology import clip_interval_set, dilate_interval_set, full_interval_set
 
 
 def _format_stats(values):
@@ -53,7 +54,10 @@ def run_benchmark(
         cp.random.seed(seed)
 
     gradients = cp.random.random((size, size), dtype=cp.float32)
-    refine_set = gradient_tag_threshold_set(gradients, threshold)
+    interval = full_interval_set(size, size)
+    gradient_field = create_interval_field(interval, fill_value=0.0, dtype=cp.float32)
+    gradient_field.values[...] = gradients.ravel()
+    refine_set = gradient_tag_threshold_set(gradient_field, width=size, height=size, threshold=threshold)
     cp.cuda.runtime.deviceSynchronize()
     enforce_times = []
     horiz_times = []
