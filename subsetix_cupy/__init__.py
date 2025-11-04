@@ -29,6 +29,7 @@ from .multilevel import (
     restrict_set,
 )
 from .morphology import (
+    translate_interval_set,
     dilate_interval_set,
     erode_interval_set,
     full_interval_set,
@@ -69,6 +70,7 @@ __all__ = [
     "restrict_level_field",
     "covered_by_fine",
     "coarse_only",
+    "translate_interval_set",
     "dilate_interval_set",
     "erode_interval_set",
     "ghost_zones",

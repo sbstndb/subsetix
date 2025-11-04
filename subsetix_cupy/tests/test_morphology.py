@@ -4,6 +4,7 @@ import numpy as np
 
 from subsetix_cupy import (
     build_interval_set,
+    translate_interval_set,
     dilate_interval_set,
     ghost_zones,
     erode_interval_set,
@@ -38,6 +39,52 @@ class MorphologyTest(unittest.TestCase):
         dilated = dilate_interval_set(base, halo_x=2, halo_y=0)
         rows = _rows_to_python(dilated, self.cp)
         self.assertEqual(rows[0], [(1, 7)])
+
+    def test_translate_horizontal(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 2],
+            begin=[1, 4],
+            end=[2, 5],
+        )
+        translated = translate_interval_set(base, dx=3, dy=0)
+        rows = _rows_to_python(translated, self.cp)
+        self.assertEqual(rows[0], [(4, 5), (7, 8)])
+        self.assertIsNone(translated.rows)
+
+    def test_translate_vertical_dense(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1, 2],
+            begin=[0, 1],
+            end=[2, 3],
+        )
+        translated = translate_interval_set(base, dx=0, dy=2)
+        row_ids = self.cp.asnumpy(translated.rows_index()).tolist()
+        self.assertEqual(row_ids, [2, 3])
+        rows = _rows_to_python(translated, self.cp)
+        self.assertEqual(rows[0], [(0, 2)])
+        self.assertEqual(rows[1], [(1, 3)])
+
+    def test_translate_sparse(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1],
+            begin=[2],
+            end=[5],
+            rows=[10],
+        )
+        translated = translate_interval_set(base, dx=-1, dy=-2)
+        row_ids = self.cp.asnumpy(translated.rows_index()).tolist()
+        self.assertEqual(row_ids, [8])
+        rows = _rows_to_python(translated, self.cp)
+        self.assertEqual(rows[0], [(1, 4)])
+
+    def test_translate_requires_int(self) -> None:
+        base = build_interval_set(
+            row_offsets=[0, 1],
+            begin=[0],
+            end=[1],
+        )
+        with self.assertRaises(TypeError):
+            translate_interval_set(base, dx=1.5)
 
     def test_dilate_adds_vertical_neighbors(self) -> None:
         base = build_interval_set(

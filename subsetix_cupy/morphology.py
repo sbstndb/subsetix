@@ -8,6 +8,7 @@ representation used throughout the CuPy backend.
 from __future__ import annotations
 
 import numpy as np
+from numbers import Integral
 
 from .expressions import IntervalSet, _require_cupy, evaluate, make_difference, make_input, make_intersection
 from .kernels import get_kernels
@@ -114,6 +115,46 @@ def _build_interval_set_from_rows(rows, begin, end, *, rows_hint=None) -> Interv
     )
 
     return IntervalSet(begin=out_begin, end=out_end, row_offsets=row_offsets, rows=rows_out.astype(cp.int32, copy=False))
+
+
+def translate_interval_set(interval_set: IntervalSet, dx: int = 0, dy: int = 0) -> IntervalSet:
+    """
+    Translate an interval set by shifting every interval horizontally by ``dx`` and every row by ``dy``.
+    """
+
+    if not isinstance(dx, Integral) or not isinstance(dy, Integral):
+        raise TypeError("dx and dy must be integers")
+
+    dx_int = int(dx)
+    dy_int = int(dy)
+    if dx_int == 0 and dy_int == 0:
+        return _clone_interval_set(interval_set)
+
+    cp = _require_cupy()
+    begin = cp.array(interval_set.begin, dtype=cp.int32, copy=True)
+    end = cp.array(interval_set.end, dtype=cp.int32, copy=True)
+    if dx_int:
+        begin += dx_int
+        end += dx_int
+
+    row_offsets = cp.array(interval_set.row_offsets, dtype=cp.int32, copy=True)
+
+    if interval_set.rows is None:
+        rows_out = None
+        if dy_int:
+            if interval_set.row_count == 0:
+                rows_out = cp.zeros(0, dtype=cp.int32)
+            else:
+                rows_out = cp.arange(interval_set.row_count, dtype=cp.int32) + dy_int
+    else:
+        rows_out = cp.array(interval_set.rows, dtype=cp.int32, copy=True)
+        if dy_int and rows_out.size > 0:
+            rows_out += dy_int
+    if rows_out is None:
+        return IntervalSet(begin=begin, end=end, row_offsets=row_offsets)
+    if rows_out.size == 0:
+        rows_out = cp.zeros(0, dtype=cp.int32)
+    return IntervalSet(begin=begin, end=end, row_offsets=row_offsets, rows=rows_out)
 
 
 def _dilate_interval_set_unbounded(
@@ -295,6 +336,7 @@ def erode_interval_set(
 
 
 __all__ = [
+    "translate_interval_set",
     "dilate_interval_set",
     "ghost_zones",
     "erode_interval_set",
